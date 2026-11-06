@@ -57,5 +57,6 @@ consequences, and where to find it in the code. The format is in [0001](0001-rec
 | [0044](0044-log-level-while-running.md) | The BFF, SO and FSP change their log level while running, through a shared `/api/log-level` | proposed |
 | [0045](0045-shared-python-package-rti-common.md) | Code the BFF, SO and FSP share goes in a workspace package, `rti-common` | proposed |
 | [0046](0046-websockets-logger-pinned-at-start-level.md) | A log level set while running leaves the `websockets` logger at its start level, so tokens stay out of the log | proposed |
+| [0047](0047-images-pushed-from-ci.md) | `images.yml` pushes the images to ghcr.io, all six for amd64 and arm64 | proposed |
 
 To add a decision, copy the layout of an existing record, take the next number, and add a line to this table.

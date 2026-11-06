@@ -78,10 +78,10 @@ jobs:
           case "${{ matrix.image }}" in
             so)          c=. ; f=examples/rti-demo/modules/so/docker/Dockerfile  ; n=iec61850-websocket/rti-so ; p=linux/amd64,linux/arm64 ; d="RTI demo SO: ACSI client, WebSocket passive side (IEC 61850 over WebSocket)" ;;
             fsp)         c=. ; f=examples/rti-demo/modules/fsp/docker/Dockerfile ; n=iec61850-websocket/rti-fsp ; p=linux/amd64,linux/arm64 ; d="RTI demo FSP: ACSI server, WebSocket active side (IEC 61850 over WebSocket)" ;;
-            bff)         c=. ; f=examples/rti-demo/modules/bff/docker/Dockerfile ; n=iec61850-websocket/rti-bff ; d="RTI demo BFF: the backend for the HMI" ;;
+            bff)         c=. ; f=examples/rti-demo/modules/bff/docker/Dockerfile ; n=iec61850-websocket/rti-bff ; p=linux/amd64,linux/arm64 ; d="RTI demo BFF: the backend for the HMI" ;;
             io)          c=examples/rti-plugins/dr_panel ; f=examples/rti-plugins/dr_panel/docker/Dockerfile ; n=iec61850-websocket/dr-panel ; p=linux/amd64,linux/arm64 ; d="RTI demo plugin dr_panel: GPIO and I2C control of the demonstrator panel on a Raspberry Pi" ;;
             leds)        c=examples/rti-plugins/dr_leds ; f=examples/rti-plugins/dr_leds/docker/Dockerfile ; n=iec61850-websocket/dr-leds ; p=linux/amd64,linux/arm64 ; d="Sample RTI demo plugin dr_leds: two simulated LEDs that show what the FSP or SO does" ;;
-            hmi)         c=examples/rti-demo/modules/hmi ; f=examples/rti-demo/modules/hmi/docker/Dockerfile ; n=iec61850-websocket/rti-hmi ; d="RTI demo HMI: the web interface, served by nginx" ;;
+            hmi)         c=examples/rti-demo/modules/hmi ; f=examples/rti-demo/modules/hmi/docker/Dockerfile ; n=iec61850-websocket/rti-hmi ; p=linux/amd64,linux/arm64 ; d="RTI demo HMI: the web interface, served by nginx" ;;
           esac
           {
             echo "ctx=$c"
@@ -139,8 +139,8 @@ jobs:
             org.opencontainers.image.description=${{ steps.img.outputs.description }}
             org.opencontainers.image.vendor=Netbeheer Nederland
 
-      # Builds every image for its platforms, but doesn't publish yet: set
-      # push to ${{ github.event_name != 'pull_request' }} to push to ghcr.io.
+      # Builds every image for its platforms and pushes it to ghcr.io, except
+      # on a pull request, which only checks that it builds (decision 0047).
       # `file` is relative to the repository root, not to `context`.
       - uses: docker/build-push-action@v6
         with:
@@ -148,7 +148,7 @@ jobs:
           file: ${{ steps.img.outputs.file }}
           build-args: ${{ steps.img.outputs.args }}
           platforms: ${{ steps.img.outputs.platforms }}
-          push: false
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}

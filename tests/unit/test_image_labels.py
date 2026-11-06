@@ -126,6 +126,17 @@ def test_ci_writes_the_labels_and_annotations_on_manifest_and_index():
     assert build["with"]["annotations"] == "${{ steps.meta.outputs.annotations }}"
 
 
+def test_ci_pushes_except_on_a_pull_request():
+    # Decision 0047: main, a tag or a manual run pushes; a pull request builds.
+    steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["build"][
+        "steps"
+    ]
+    [build] = [s for s in steps if "docker/build-push-action" in s.get("uses", "")]
+    assert build["with"]["push"] == "${{ github.event_name != 'pull_request' }}"
+    [login] = [s for s in steps if "docker/login-action" in s.get("uses", "")]
+    assert login["if"] == "github.event_name != 'pull_request'"
+
+
 def _img_outputs(tmp_path: Path, image: str) -> dict[str, str]:
     """Runs the img step's script for one matrix image, as the runner would."""
     steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["build"][
@@ -152,10 +163,10 @@ def test_ci_puts_index_annotations_only_on_a_multi_platform_image(tmp_path, imag
     assert outputs["annotation_levels"] == ("manifest,index" if multi else "manifest")
 
 
-def test_ci_has_single_and_multi_platform_images(tmp_path):
+def test_ci_builds_every_image_for_amd64_and_arm64(tmp_path):
+    # Decision 0047: a pushed image replaces latest, so each must keep arm64.
     platforms = {
         image: _img_outputs(tmp_path, image)["platforms"]
         for image in ["so", "fsp", "bff", "io", "leds", "hmi"]
     }
-    assert platforms["bff"] == platforms["hmi"] == "linux/amd64"
-    assert all("," in platforms[i] for i in ["so", "fsp", "io", "leds"])
+    assert set(platforms.values()) == {"linux/amd64,linux/arm64"}

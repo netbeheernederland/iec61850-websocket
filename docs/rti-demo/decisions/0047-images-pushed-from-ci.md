@@ -52,3 +52,5 @@ Options considered:
 ## In the code
 
 - `.github/workflows/images.yml` (the `img` step's platforms, and `push` in the `docker/build-push-action` step)
+- `tests/unit/test_image_labels.py` (`test_ci_builds_every_image_for_amd64_and_arm64`,
+  `test_ci_pushes_except_on_a_pull_request`)

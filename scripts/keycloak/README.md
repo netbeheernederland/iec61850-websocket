@@ -1,35 +1,54 @@
+<!--
+SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Running Keycloak with Docker Compose
 
 ## Getting Started
 
-* Keycloak exposed on the local port 8080 and created an initial 'admin' user with the username 'admin"
+* Keycloak exposed on the local port 8081 (HTTP; 8080 is the rti-demo HMI) and created an initial 'admin' user with the username 'admin"
   and password admin (see the Keycloak docker compose file in the scripts/keycloak directory to change the default admin
   user credentials).
 * The Keycloak realm and client configuration used by this test are imported from the local `keycloak` directory in this
   test folder.
 * The Keycloak Docker image is used to start the Keycloak server.
 * SSL is enabled for the Keycloak server and uses a self-signed certificate located in the `testing/certs` directory.
+  The certificates aren't in git: generate them once, before the first start (needs
+  [cfssl](../../docs/getting-started.md#6-cfssl)):
+
+```shell
+(cd ../../testing/certs && ./generate.sh)
+```
+
+  Without `keycloak.pem` and `keycloak-key.pem`, Docker creates empty directories with those names in their place and
+  Keycloak doesn't start. Remove them (`sudo rm -rf ../../testing/certs/keycloak*.pem`) and generate the certificates.
 * Run the following command to start Keycloak in the scripts/keycloak directory:
+
+```shell
+docker network create rti-network 2>/dev/null || true
+```
 
 ```shell
 docker compose up
 ```
 
-* Log in to the Admin Console (http://localhost:8080), with the username and password you created earlier
+* Log in to the Admin Console (http://localhost:8081), with the username and password you created earlier
 
-![key-cloak start screen](./images/keycloak-start-screen.png)
+![Keycloak admin console after logging in](./images/keycloak-clients-screen.png)
 
 Or directly test a realm endpoint:
 
 ```shell
-curl "http://localhost:8080/realms/iec61850-test"
+curl "http://localhost:8081/realms/iec61850-test"
 ```
 
 * Get an access token for the ws-client client:
 
 ```shell
 curl -X POST \
-  http://localhost:8080/realms/iec61850-test/protocol/openid-connect/token \
+  http://localhost:8081/realms/iec61850-test/protocol/openid-connect/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials" \
   -d "client_id=ws-client" \
@@ -40,7 +59,7 @@ Or with SSL:
 
 ```shell
 curl -X POST \
-  --cacert ../../../testing/certs/ca.pem \
+  --cacert ../../testing/certs/ca.pem \
   https://localhost:8443/realms/iec61850-test/protocol/openid-connect/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials" \

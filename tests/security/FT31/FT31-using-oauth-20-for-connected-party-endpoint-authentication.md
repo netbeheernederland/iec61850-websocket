@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # FT31: Using OAuth 2.0 for Connected Party Endpoint Authentication
 
 ## Scope
@@ -83,18 +89,18 @@ The current FT31 scripts do not expose command-line options or environment varia
 
 ## Start Keycloak
 
-The FT31 test expects the Keycloak container defined in `scripts/keycloak/docker-compose.yaml`.
+The FT31 test expects the Keycloak container defined in `scripts/keycloak/docker-compose.yml`.
 
 From the repository root:
 
 ```bash
-docker compose -f scripts/keycloak/docker-compose.yaml up
+docker compose -f scripts/keycloak/docker-compose.yml up
 ```
 
 The docker-compose file provides:
 
 - starts Keycloak 26.0
-- exposes HTTP on `8080`
+- exposes HTTP on `8081`
 - exposes HTTPS on `8443`
 - bootstraps the admin user as `admin` / `admin`
 - imports the realm from `scripts/keycloak/data/realm-test.json`
@@ -207,7 +213,7 @@ From the repository root:
 
 ```bash
 uv sync
-docker compose -f scripts/keycloak/docker-compose.yaml up
+docker compose -f scripts/keycloak/docker-compose.yml up
 ```
 
 In another terminal:

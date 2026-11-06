@@ -1,0 +1,322 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+# SPDX-License-Identifier: Apache-2.0
+"""The rti-demo's default ports, read from every place that sets one.
+
+One table; each source - code defaults, Dockerfiles, docker-compose.yml,
+launch.py, the HMI's Vite/nginx/config.js and the seed connections - must
+agree with it, so a port can't be changed in one place and forgotten in
+another.
+"""
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+DEMO = ROOT / "examples" / "rti-demo"
+MODULES = DEMO / "modules"
+# The IO plugin, in its own folder (decisions 0028, 0030).
+IO_PLUGIN = ROOT / "examples" / "rti-plugins" / "dr_panel"
+
+EXPECTED_PORTS = {
+    "hmi": 8080,
+    "bff": 3000,
+    "so": 5000,
+    "fsp": 5001,
+    "fsp2": 5005,
+    "io": 9000,
+}
+KEYCLOAK_HTTP_PORT = 8081
+# The SO's WebSocket server (passive endpoint) that the FSPs dial.
+SO_WS_PORT = 8765
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _one(pattern: str, text: str, where: str) -> int:
+    matches = re.findall(pattern, text)
+    assert len(matches) >= 1, f"{where}: no match for {pattern!r}"
+    assert len(set(matches)) == 1, f"{where}: conflicting values {matches}"
+    return int(matches[0])
+
+
+@pytest.fixture(scope="module")
+def compose():
+    return yaml.safe_load(_read(DEMO / "docker-compose.yml"))["services"]
+
+
+@pytest.fixture(scope="module")
+def leds_compose():
+    return yaml.safe_load(_read(DEMO / "docker-compose.leds.yaml"))["services"]
+
+
+@pytest.fixture(scope="module")
+def io_overlay():
+    return yaml.safe_load(_read(DEMO / "docker-compose.io.yaml"))["services"]
+
+
+@pytest.fixture(scope="module")
+def io_compose():
+    return yaml.safe_load(_read(IO_PLUGIN / "docker-compose.yaml"))["services"]
+
+
+@pytest.mark.parametrize(
+    ("service", "role"),
+    [
+        ("rti-bff", "bff"),
+        ("rti-so", "so"),
+        ("rti-fsp01", "fsp"),
+        ("rti-fsp02", "fsp2"),
+    ],
+)
+def test_compose_publishes_and_labels_the_port(compose, service, role):
+    port = EXPECTED_PORTS[role]
+    svc = compose[service]
+    assert f"{port}:{port}" in svc["ports"]
+    assert f"rti.port={port}" in svc["labels"]
+
+
+def test_the_io_server_s_compose_publishes_and_labels_the_port(io_compose):
+    port = EXPECTED_PORTS["io"]
+    svc = io_compose["dr-panel"]
+    assert f"{port}:{port}" in svc["ports"]
+    assert f"rti.port={port}" in svc["labels"]
+
+
+def test_the_io_server_is_its_own_stack_on_the_demo_s_network(compose, io_compose):
+    # Decision 0028: dr-panel isn't in the demo's compose, but on its network.
+    assert "dr-panel" not in compose
+    assert io_compose["dr-panel"]["networks"] == ["rti-network"]
+
+
+def test_compose_publishes_the_hmi_on_8080(compose):
+    assert compose["rti-hmi"]["ports"] == [f"{EXPECTED_PORTS['hmi']}:80"]
+
+
+@pytest.mark.parametrize(
+    ("module", "role"), [("bff", "bff"), ("so", "so"), ("fsp", "fsp")]
+)
+def test_dockerfile_default_port(module, role):
+    text = _read(MODULES / module / "docker" / "Dockerfile")
+    assert (
+        _one(r"ARG APP_PORT=(\d+)", text, f"{module} Dockerfile ARG")
+        == EXPECTED_PORTS[role]
+    )
+    assert (
+        _one(r"EXPOSE (\d+)", text, f"{module} Dockerfile EXPOSE")
+        == EXPECTED_PORTS[role]
+    )
+
+
+def test_io_dockerfile_port_and_health_check():
+    text = _read(IO_PLUGIN / "docker" / "Dockerfile")
+    assert _one(r"PORT=(\d+)", text, "io Dockerfile ENV") == EXPECTED_PORTS["io"]
+    assert _one(r"EXPOSE (\d+)", text, "io Dockerfile EXPOSE") == EXPECTED_PORTS["io"]
+    # The health check follows $PORT instead of repeating the number.
+    assert "http://localhost:$PORT/api/io/health" in text
+
+
+@pytest.mark.parametrize(
+    ("path", "role"),
+    [
+        ("bff/src/bff/bff_server.py", "bff"),
+        ("so/src/so/bff_endpoint.py", "so"),
+        ("fsp/src/fsp/bff_endpoint.py", "fsp"),
+        ("../../rti-plugins/dr_panel/src/dr_panel/server/main.py", "io"),
+    ],
+)
+def test_code_default_port(path, role):
+    text = _read(MODULES / path)
+    # Either quote style: an f-string fallback uses single quotes.
+    pattern = r'os\.getenv\(["\']PORT["\'], ["\'](\d+)["\']\)'
+    assert _one(pattern, text, path) == EXPECTED_PORTS[role]
+
+
+def _plugin_config(compose_services, service):
+    svc = compose_services[service]
+    [mount] = [v for v in svc["volumes"] if v.endswith(":/plugins/plugins.json:ro")]
+    return json.loads(_read(DEMO / mount.split(":")[0]))
+
+
+@pytest.mark.parametrize(
+    ("service", "role"), [("rti-so", "so"), ("rti-fsp01", "fsp"), ("rti-fsp02", "fsp2")]
+)
+def test_compose_connects_dr_leds_and_names_the_way_back(
+    compose, leds_compose, service, role
+):
+    # Plugins over HTTP, from the plugin configuration (decision 0029): by
+    # default each FSP and SO its own dr_leds, run by docker-compose.leds.yaml
+    # (decision 0034).
+    assert "PLUGINS_FILE=/plugins/plugins.json" in compose[service]["environment"]
+    config = _plugin_config(compose, service)
+    assert config["host_url"] == f"http://{service}:{EXPECTED_PORTS[role]}"
+    [leds] = config["plugins"]
+    assert leds["name"] == "dr_leds"
+    sim = service.replace("rti-", "dr-leds-")
+    assert leds["url"] == f"http://{sim}:8099/plugin"
+    assert leds_compose[sim]["networks"] == ["rti-network"]
+
+
+def test_the_leds_overlay_runs_only_dr_leds(leds_compose):
+    assert set(leds_compose) == {"dr-leds-fsp01", "dr-leds-fsp02", "dr-leds-so"}
+    for svc in leds_compose.values():
+        assert svc["image"] == (
+            "${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/dr-leds:${RTI_IMAGE_TAG:-latest}"
+        )
+        assert "ports" not in svc
+
+
+def test_the_io_overlay_runs_one_io_server(io_overlay, io_compose):
+    # Like the LEDs overlay: the plugin's service on rti-network, nothing
+    # published. One for all three: on the Pi it holds the pins.
+    svc = io_overlay["dr-panel"]
+    assert set(io_overlay) == {"dr-panel", "rti-fsp01", "rti-fsp02", "rti-so"}
+    assert svc["image"] == io_compose["dr-panel"]["image"]
+    assert svc["build"]["args"] == io_compose["dr-panel"]["build"]["args"]
+    assert svc["networks"] == ["rti-network"]
+    assert "ports" not in svc
+    # The Pi's devices come from dr_panel's own docker-compose.pi.yaml.
+    for key in ("devices", "group_add", "user", "ipc", "security_opt", "cap_add"):
+        assert key not in svc
+
+
+@pytest.mark.parametrize(
+    ("service", "role"), [("rti-so", "so"), ("rti-fsp01", "fsp"), ("rti-fsp02", "fsp2")]
+)
+def test_the_io_overlay_connects_the_io_plugin(io_overlay, service, role):
+    # Opt-in (decision 0034): docker-compose.io.yaml mounts the IO server's
+    # configuration over the default one.
+    config = _plugin_config(io_overlay, service)
+    assert config["host_url"] == f"http://{service}:{EXPECTED_PORTS[role]}"
+    [io] = config["plugins"]
+    assert io["url"] == f"http://dr-panel:{EXPECTED_PORTS['io']}/plugin"
+    # One IO server writes its inputs to the first FSP only.
+    write_inputs = io.get("settings", {}).get("write_inputs", True)
+    assert write_inputs is (service == "rti-fsp01")
+
+
+@pytest.mark.parametrize("service", ["rti-so", "rti-fsp01", "rti-fsp02"])
+def test_compose_leaves_allowed_sources_to_the_default(compose, service):
+    # Unset: any URL (decision 0037); an override narrows it.
+    env = compose[service]["environment"]
+    assert not any(e.startswith("PLUGIN_ALLOWED_SOURCES=") for e in env)
+
+
+def test_launch_py_points_the_io_plugin_at_the_io_port():
+    text = _read(DEMO / "launch.py")
+    pattern = r'IO_PLUGIN_URL = "http://localhost:(\d+)/plugin"'
+    assert _one(pattern, text, "launch.py") == EXPECTED_PORTS["io"]
+
+
+def test_launch_py_default_ports():
+    text = _read(DEMO / "launch.py")
+    roles = (
+        ("bff", "BFF"),
+        ("so", "SO"),
+        ("fsp", "FSP"),
+        ("fsp2", "FSP2"),
+        ("io", "IO"),
+    )
+    for role, enum in roles:
+        block = re.search(
+            rf"ServiceType\.{enum}: ServiceConfig\((.*?)\n    \),", text, re.S
+        )
+        assert block, f"launch.py: no ServiceConfig for {enum}"
+        port = EXPECTED_PORTS[role]
+        assert f"default_port={port}," in block.group(1), enum
+        assert f'"PORT": "{port}"' in block.group(1), enum
+        assert f'"rti.port": "{port}"' in block.group(1), enum
+
+
+def test_hmi_dev_server_port():
+    text = _read(MODULES / "hmi" / "vite.config.js")
+    assert _one(r"port:\s*(\d+)", text, "vite.config.js") == EXPECTED_PORTS["hmi"]
+
+
+def test_hmi_default_bff_port():
+    text = _read(MODULES / "hmi" / "src" / "config.js")
+    assert (
+        _one(r"VITE_BFF_PORT \|\| '(\d+)'", text, "hmi config.js")
+        == EXPECTED_PORTS["bff"]
+    )
+
+
+def test_hmi_nginx_proxies_to_the_bff_port():
+    text = _read(MODULES / "hmi" / "nginx.conf")
+    assert (
+        _one(r"proxy_pass http://rti-bff:(\d+);", text, "nginx.conf")
+        == EXPECTED_PORTS["bff"]
+    )
+
+
+def test_playbook_default_bff():
+    text = _read(MODULES / "bff" / "src" / "bff" / "playbook.py")
+    assert (
+        _one(r'DEFAULT_BFF = "http://localhost:(\d+)"', text, "playbook.py")
+        == EXPECTED_PORTS["bff"]
+    )
+
+
+def test_seed_connections_use_the_service_ports():
+    seed = json.loads(_read(MODULES / "bff" / "src" / "bff" / "connections.json"))
+    ports = {c["name"]: c["port"] for c in seed}
+    assert ports == {
+        "SO": EXPECTED_PORTS["so"],
+        "FSP01": EXPECTED_PORTS["fsp"],
+        "FSP02": EXPECTED_PORTS["fsp2"],
+    }
+
+
+def test_integration_tests_use_the_current_ports():
+    """The Docker-stack integration tests talk to the published BFF/SO ports."""
+    for path in sorted((DEMO / "tests" / "integration").glob("*.py")):
+        text = _read(path)
+        for port in re.findall(r"localhost:(\d+)", text):
+            assert int(port) in EXPECTED_PORTS.values(), (
+                f"{path.name}: localhost:{port}"
+            )
+        for port in re.findall(r'"port":\s*(\d+)', text):
+            assert int(port) in EXPECTED_PORTS.values(), f"{path.name}: port {port}"
+
+
+def _hmi_sources():
+    src = MODULES / "hmi" / "src"
+    return [
+        p
+        for p in sorted(src.rglob("*.js*"))
+        if ".test." not in p.name and p.name != "config.js"
+    ]
+
+
+def test_hmi_takes_the_bff_address_from_config_js():
+    """Only src/config.js holds the default BFF address (see its docstring)."""
+    for path in _hmi_sources():
+        text = _read(path)
+        assert not re.search(r"localhost:\d+", text), f"{path.name} hardcodes a URL"
+
+
+def test_keycloak_http_port():
+    text = _read(ROOT / "scripts" / "keycloak" / "docker-compose.yml")
+    port = KEYCLOAK_HTTP_PORT
+    assert f'"{port}:{port}"' in text
+    assert f"KC_HTTP_PORT: {port}" in text
+    for path in _hmi_sources():
+        for found in re.findall(r"keycloak:(\d+)", _read(path)):
+            assert int(found) == port, f"{path.name}: keycloak:{found}"
+
+
+def test_so_websocket_port(compose):
+    port = SO_WS_PORT
+    assert f"{port}:{port}" in compose["rti-so"]["ports"]
+    seed = json.loads(_read(MODULES / "bff" / "src" / "bff" / "connections.json"))
+    [so] = [c for c in seed if c["type"] == "RTI-SO"]
+    # The demo playbook links an FSP to the SO at this port.
+    assert so.get("ws_port") == port
+    text = _read(MODULES / "so" / "src" / "so" / "bff_endpoint.py")
+    pattern = r'os\.getenv\("SO_WS_PORT", "(\d+)"\)'
+    assert _one(pattern, text, "so bff_endpoint.py SO_WS_PORT") == port

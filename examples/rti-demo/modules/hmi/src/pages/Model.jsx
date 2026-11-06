@@ -1,0 +1,462 @@
+/*
+ * SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Copyright 2025-2026 Netbeheer Nederland
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import Tree from '../components/Tree';
+import InstanceVisualization from '../components/InstanceVisualization';
+import { executeApiCall, buildTargetValue, getAutoRefreshIntervalMs } from '../services/apiService';
+import { generateModelPyCode } from '../utils/sclParser';
+import { transformModelToTree } from '../utils/modelUtils';
+import { log } from '../utils/log';
+
+function Model({ settings, connections = [], loading = false, onReload }) {
+  const navigate = useNavigate();
+  const [treeData, setTreeData] = useState(null);
+  const [selectedConnection, setSelectedConnection] = useState(null);
+  const [uploadingModel, setUploadingModel] = useState(false);
+  const [expandedNodes, setExpandedNodes] = useState({});
+  const fileInputRef = useRef(null);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [autoRefreshTree, setAutoRefreshTree] = useState(false);
+  const treeRefreshIntervalRef = useRef(null);
+
+  const handleExpandToggle = useCallback((ref, expanded) => {
+    setExpandedNodes(prev => ({
+      ...prev,
+      [ref]: expanded
+    }));
+  }, []);
+
+  const handleConnectionClick = (conn) => {
+    setSelectedConnection(conn);
+    // Fresh load starts fully collapsed - but only here, not on the
+    // auto-refresh interval below, which reuses loadModel too and should
+    // preserve whatever the user has expanded while it silently refreshes.
+    setExpandedNodes({});
+    loadModel(conn);
+  };
+
+  const loadModel = useCallback(async (conn) => {
+    if (!conn) return;
+    try {
+      const targetValue = buildTargetValue(conn.host, conn.port);
+      const result = await executeApiCall('model', targetValue, {});
+      
+      if (result?.ok) {
+        let modelData = result.payload;
+        
+        // Path 1: result.result.model (BFF wraps response in result)
+        if (modelData?.result?.model) {
+          modelData = modelData.result.model;
+        }
+        // Path 2: Direct model field
+        else if (modelData?.model) {
+          modelData = modelData.model;
+        }
+        // Path 3: The payload itself might be the model
+        
+        // Check if there's a tree field
+        if (modelData?.tree) {
+          modelData = modelData.tree;
+        }
+        
+        // Handle case where model is a Python dict string
+        if (typeof modelData === 'string') {
+          // Try to parse as JSON first
+          try {
+            modelData = JSON.parse(modelData);
+          } catch (e) {
+            // If not JSON, try to parse as Python dict string
+            const jsonStr = modelData
+              .replace(/'/g, '"')
+              .replace(/True/g, 'true')
+              .replace(/False/g, 'false')
+              .replace(/None/g, 'null');
+            try {
+              modelData = JSON.parse(jsonStr);
+            } catch (e2) {
+              log.error('Failed to parse model data:', e2);
+            }
+          }
+        }
+        
+        if (modelData === result.payload && modelData?.result) {
+          modelData = modelData.result;
+        }
+        
+        // If modelData has accessPoints but no children structure, create a simple tree
+        if (modelData?.accessPoints && !modelData.children && !modelData.ieds && !modelData.kind) {
+          modelData = {
+            iedName: modelData.iedName || conn.name || 'Server',
+            accessPoints: modelData.accessPoints.map(apName => ({
+              name: apName,
+              ldevices: []
+            }))
+          };
+        }
+        
+        if (modelData && Object.keys(modelData).length > 0) {
+          setTreeData(transformModelToTree(modelData));
+        }
+      }
+    } catch (error) {
+      log.error('Failed to load model:', error);
+    }
+  }, []);
+
+  // Auto-refresh: while enabled, periodically reload the tree for the
+  // selected connection so model changes (e.g. after an "Update Model"
+  // upload from another instance) show up without a manual "View" click.
+  useEffect(() => {
+    if (treeRefreshIntervalRef.current) {
+      clearInterval(treeRefreshIntervalRef.current);
+      treeRefreshIntervalRef.current = null;
+    }
+    if (!autoRefreshTree || !selectedConnection) return undefined;
+
+    treeRefreshIntervalRef.current = setInterval(() => {
+      loadModel(selectedConnection);
+    }, getAutoRefreshIntervalMs());
+    return () => {
+      if (treeRefreshIntervalRef.current) {
+        clearInterval(treeRefreshIntervalRef.current);
+        treeRefreshIntervalRef.current = null;
+      }
+    };
+  }, [autoRefreshTree, selectedConnection, loadModel]);
+
+  // Turning the selected connection off shouldn't leave a stale toggle on.
+  useEffect(() => {
+    if (autoRefreshTree && !selectedConnection) {
+      setAutoRefreshTree(false);
+    }
+  }, [selectedConnection, autoRefreshTree]);
+
+  const handleNavigateToInstance = (conn) => {
+    if (conn.type === 'RTI-SO') {
+      navigate('/acsi-client', { state: { endpoint: conn } });
+    } else if (conn.type === 'RTI-FSP') {
+      // ?fsp=<name> lets ACSIServer.jsx recover which instance this is
+      // after a page refresh, when the state below (React Router
+      // in-memory only) is gone - see the paramEndpoint resolution there.
+      const search = conn?.name ? `?fsp=${encodeURIComponent(conn.name)}` : '';
+      navigate({ pathname: '/acsi-server', search }, { state: { endpoint: conn } });
+    }
+  };
+
+  // Handle model file upload for a specific connection
+  const handleUpdateModel = useCallback(async (conn, file) => {
+    if (!conn || !file) return;
+
+    try {
+      setUploadingModel(true);
+      setUploadStatus(`Uploading model for ${conn.name}...`);
+
+      // Read file content
+      const reader = new FileReader();
+      const content = await new Promise((resolve, reject) => {
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsText(file);
+      });
+
+      if (!content || typeof content !== 'string') {
+        throw new Error('Could not read file content');
+      }
+
+      if (!content.trim()) {
+        throw new Error('File content is empty');
+      }
+
+      let modelPyContent = content;
+
+      // If SCL file, convert to Python
+      if (file.name.endsWith('.scl') || file.name.endsWith('.scd') || file.name.endsWith('.icd') || file.name.endsWith('.cid')) {
+        modelPyContent = generateModelPyCode(content, null, null, file.name);
+      }
+
+      if (!conn) {
+        throw new Error('No connection provided');
+      }
+      if (!('host' in conn) || !('port' in conn)) {
+        throw new Error(`Connection ${conn.name || 'unknown'} is missing host or port property`);
+      }
+      if (!conn.host || !conn.port) {
+        throw new Error(`Connection ${conn.name || 'unknown'} has empty host or port (host: ${conn.host}, port: ${conn.port})`);
+      }
+
+      const targetValue = buildTargetValue(conn.host, conn.port);
+      if (!targetValue) {
+        throw new Error(`Could not build target value from host: ${conn.host}, port: ${conn.port}`);
+      }
+      const result = await executeApiCall('update-iedmodel', targetValue, { modelPy: modelPyContent });
+
+      if (result?.ok) {
+        setUploadStatus(`Model updated successfully for ${conn.name}`);
+        //rebuild models 
+        try {
+          const targetValue = buildTargetValue(conn.host, conn.port);
+          const statusResult = await executeApiCall('model', targetValue, {});
+          const fspCp = statusResult?.payload?.result?.accessPoints?.[0] || 'cp1';
+
+          const connectedSoInstances = connections.filter(
+            c => c.type === 'RTI-SO' && c.status === 'connected'
+          );
+          Promise.allSettled(
+            connectedSoInstances.map(soConn =>
+              executeApiCall('model-tree', buildTargetValue(soConn.host, soConn.port), {
+                cp: fspCp,
+                refresh: true
+              })
+            )
+          );
+        } catch (notifyErr) {
+          log.error('Failed to notify SO instances of model change:', notifyErr);
+        }
+
+
+        // Reload connections to get the updated model
+        setTimeout(() => {
+          onReload?.();
+          setUploadStatus('');
+        }, 1000);
+      } else {
+        setUploadStatus(`Error updating model: ${result?.error || result?.payload?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      log.error('Failed to update model:', error);
+      setUploadStatus(`Error: ${error.message}`);
+    } finally {
+      setUploadingModel(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, [setUploadingModel, setUploadStatus]);
+
+  const handleUpdateModelClick = useCallback((conn) => {
+    const currentConn = conn;
+    
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.py,.scl,.scd,.icd,.cid';
+    input.style.display = 'none';
+    
+    input.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (file) {
+        await handleUpdateModel(currentConn, file);
+      }
+      document.body.removeChild(input);
+    };
+    
+    document.body.appendChild(input);
+    input.click();
+  }, [handleUpdateModel]);
+
+  return (
+    <section className="page">
+      <div className="page-header" style={{ marginBottom: '20px' }}>
+        <h2>Model</h2>
+        <p style={{ color: 'var(--text-muted)', marginTop: '4px' }}>SOs, FSP and Instances</p>
+      </div>
+
+      <div style={{ marginBottom: '40px' }}>
+        {loading ? (
+          <div className="endpoints-loading">
+            <span className="spinner"></span>
+            Loading connections...
+          </div>
+        ) : (
+          <InstanceVisualization
+            connections={connections}
+            selectedConnection={selectedConnection}
+            loading={loading}
+            onConnectionClick={handleConnectionClick}
+            showLabels={true}
+          />
+        )}
+      </div>
+
+      <div style={{ paddingTop: '20px', borderTop: '1px solid var(--border-color)', marginTop: '20px' }}>
+        <h3 style={{ marginBottom: '12px' }}>Instances</h3>
+        {connections && connections.filter(conn => conn.type === 'RTI-FSP').length > 0 ? (
+          <div style={{ border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
+            {connections.filter(conn => conn.type === 'RTI-FSP').map((conn, index) => (
+              <div 
+                key={conn.name || index} 
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '16px 20px',
+                  borderBottom: index < connections.filter(conn => conn.type === 'RTI-FSP').length - 1 ? '1px solid var(--border-color)' : 'none',
+                  background: index % 2 === 0 ? 'var(--bg-card)' : 'var(--bg-hover)',
+                  cursor: 'pointer'
+                }}
+                onClick={() => handleConnectionClick(conn)}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
+                  <span style={{ color: 'var(--text-secondary)', fontWeight: '500', minWidth: '100px' }}>
+                    {conn.type}
+                  </span>
+                  <span style={{ color: 'var(--text-muted)' }}>·</span>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: '500', minWidth: '150px' }}>
+                    {conn.name}
+                  </span>
+                  <span style={{ color: 'var(--text-muted)' }}>·</span>
+                  <span style={{ color: 'var(--text-secondary)', minWidth: '150px' }}>
+                    {conn.host}:{conn.port}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                  <span 
+                    className="bff-status-dot" 
+                    style={{
+                      background: conn.status === 'connected' ? 'var(--success-color)' : 'var(--danger-color)'
+                    }}
+                  ></span>
+                  {conn.status === 'connected' && (
+                    <>
+                      <button 
+                        className="btn-secondary"
+                        style={{ padding: '6px 12px', fontSize: '12px' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleConnectionClick(conn);
+                        }}
+                        title="View Model"
+                      >
+                        View
+                      </button>
+                      <button 
+                        className="btn-secondary"
+                        style={{ padding: '6px 12px', fontSize: '12px' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleUpdateModelClick(conn);
+                        }}
+                        title="Upload model file (Python or SCL)"
+                        disabled={uploadingModel}
+                      >
+                        {uploadingModel ? 'Uploading...' : 'Update Model'}
+                      </button>
+                      <button 
+                        className="btn-icon" 
+                        style={{ padding: '6px', fontSize: '14px' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleNavigateToInstance(conn);
+                        }}
+                        title="Open instance"
+                      >
+                        <i className="fas fa-arrow-right"></i>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '20px' }}>
+            No RTI-FSP (Server) instances found.
+          </p>
+        )}
+        {uploadStatus && (
+          <div style={{ 
+            marginTop: '12px', 
+            padding: '10px 16px', 
+            background: uploadStatus.includes('Error') ? 'var(--danger-bg)' : 'var(--success-bg)',
+            borderRadius: '4px',
+            color: uploadStatus.includes('Error') ? 'var(--danger-color)' : 'var(--success-color)',
+            fontSize: '13px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            {uploadingModel ? (
+              <>
+                <span className="spinner" style={{ width: '14px', height: '14px' }}></span>
+                {uploadStatus}
+              </>
+            ) : (
+              <>
+                {uploadStatus.includes('Error') ? (
+                  <i className="fas fa-exclamation-circle"></i>
+                ) : (
+                  <i className="fas fa-check-circle"></i>
+                )}
+                {uploadStatus}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{ paddingTop: '20px', borderTop: '1px solid var(--border-color)' }}>
+        {selectedConnection && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ margin: 0 }}>Model for: {selectedConnection.name}</h3>
+            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={autoRefreshTree}
+                  onChange={(e) => setAutoRefreshTree(e.target.checked)}
+                />
+                Auto-refresh
+              </label>
+              <button
+                className="btn-icon"
+                onClick={() => handleNavigateToInstance(selectedConnection)}
+                title="Open instance"
+              >
+                <i className="fas fa-external-link-alt"></i>
+              </button>
+            </div>
+          </div>
+        )}
+        
+        <div id="model-tree-container" className="model-tree">
+          {loading ? (
+            <div className="endpoints-loading">
+              <span className="spinner"></span>
+              Loading model...
+            </div>
+          ) : treeData ? (
+            <Tree data={treeData} expandedNodes={expandedNodes} onExpandToggle={handleExpandToggle} />
+          ) : selectedConnection ? (
+            <p style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '20px' }}>
+              Click on a connection to load its model
+            </p>
+          ) : (
+            <p style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '20px' }}>
+              Select a connected instance to view its model
+            </p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export default Model;
+

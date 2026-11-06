@@ -1,0 +1,9 @@
+{
+  "host_url": "http://rti-fsp01:5001",
+  "plugins": [
+    {
+      "name": "dr_leds",
+      "url": "http://dr-leds-fsp01:8099/plugin"
+    }
+  ]
+}

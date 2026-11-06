@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # FT23: Running the OAuth 2.0 + TLS Performance Test
 
 ## Scope
@@ -80,18 +86,18 @@ These only need to be set when you want values different from the defaults.
 
 ## Start Keycloak
 
-The FT23 test expects the Keycloak container defined in `scripts/keycloak/docker-compose.yaml`.
+The FT23 test expects the Keycloak container defined in `scripts/keycloak/docker-compose.yml`.
 
 From the repository root:
 
 ```bash
-docker compose -f scripts/keycloak/docker-compose.yaml up
+docker compose -f scripts/keycloak/docker-compose.yml up
 ```
 
 The docker-compose file provides:
 
 - starts Keycloak 26.0
-- exposes HTTP on `8080`
+- exposes HTTP on `8081`
 - exposes HTTPS on `8443`
 - bootstraps the admin user as `admin` / `admin`
 - imports the realm from `scripts/keycloak/data/realm-test.json`
@@ -123,7 +129,7 @@ uv run python tests/performance/FT23/client_credentials/create_keycloak_clients.
 Notes:
 
 - The script writes the credentials back to `tests/performance/FT23/data/client_credentials.json`.
-- The provisioning script talks to the Keycloak admin API on `http://localhost:8080`.
+- The provisioning script talks to the Keycloak admin API on `http://localhost:8081`.
 - It uses the admin account from the compose file by default: `admin` / `admin`.
 
 If your Keycloak admin settings are different, set:
@@ -226,7 +232,7 @@ From the repository root:
 
 ```bash
 uv sync
-docker compose -f scripts/keycloak/docker-compose.yaml up
+docker compose -f scripts/keycloak/docker-compose.yml up
 ```
 
 In another terminal:

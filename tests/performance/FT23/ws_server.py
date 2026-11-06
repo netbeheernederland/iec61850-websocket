@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,10 +20,10 @@ import os
 import sys
 from pathlib import Path
 
-from ws61850.endpoint.endpoint import WebSocketEndpoint
+from ws61850.endpoint.passive_endpoint import PassiveEndpoint
 from ws61850.iec61850.client.iec61850_client import IEC61850Client
 from ws61850.iec61850.data_model.helper import get_now_time
-from ws61850.security.tls import TLSConfiguration
+from ws61850.security.tls import TLSConfig
 
 _project_root = Path(__file__).resolve().parents[3]
 if str(_project_root) not in sys.path:
@@ -39,13 +39,9 @@ key_path = CERT_DIR / "server-key.pem"
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     stream=sys.stdout,
 )
-
-
-max_message_size_server = 65000  # noqa: N816
-
 
 optional_fields = {
     "seqNum": False,
@@ -58,7 +54,7 @@ optional_fields = {
     "reasonCode": False,
 }
 
-trgOp = {"dchg": False, "qchg": False, "dupd": False, "integrity": True, "gi": False}
+trg_op = {"dchg": False, "qchg": False, "dupd": False, "integrity": True, "gi": False}
 
 brcb = IEC61850Client.ClientReportControlBlock("LD0/LLN0.rcbMinMaxAvg", True)
 brcb.rptEna = True
@@ -66,7 +62,7 @@ brcb.confRev = 5
 brcb.opt_flds = optional_fields
 brcb.bufTm = 1000
 brcb.sqNum = 42
-brcb.trgOps = trgOp
+brcb.trgOps = trg_op
 brcb.intgPd = 2000
 brcb.gi = True
 brcb.purgeBuf = False
@@ -80,13 +76,12 @@ urcb.confRev = 5
 urcb.opt_flds = optional_fields
 urcb.bufTm = 1000
 urcb.sqNum = 88
-urcb.trgOps = trgOp
+urcb.trgOps = trg_op
 urcb.intgPd = 5000
 urcb.gi = True
 urcb.entryId = b"\x01\x02\x03\x04\x05\x06\x07\x08"
 urcb.timeOfEntry = get_now_time()
 urcb.resv = True
-
 
 data_attribute_value = {
     "name": "Oper",
@@ -161,31 +156,30 @@ def resolve_credentials_path(credentials_file_path: str) -> Path:
     return (project_root / path).resolve()
 
 
-def callback_called(result, param):
-    logger.info(f"callback called: {result}")
-
-
-async def add_iec61850_client_requests(iec61850_client, ws_server):
+async def add_iec61850_client_requests(iec61850_client, endpoint):
     await iec61850_client.ready_event.wait()
     if iec61850_client.is_connected is True:
-        websocket_info = ws_server.get_websocket_info(iec61850_client)
+        websocket_info = endpoint.get_websocket_info(iec61850_client)
         if websocket_info is not None:
             try:
-                server_list = await iec61850_client.get_server_directory(websocket_info, None, None)
-                ld_directory = await iec61850_client.get_logical_device_directory("LD0", websocket_info, None, None)
-                ln_directory_ds = await iec61850_client.get_logical_node_directory(
+                await iec61850_client.get_server_directory(websocket_info, None, None)
+                await iec61850_client.get_logical_device_directory(
+                    "LD0", websocket_info, None, None
+                )
+                await iec61850_client.get_logical_node_directory(
                     "LD0", "LLN0", "dataset", websocket_info, None, None
                 )
-                ln_directory_do = await iec61850_client.get_logical_node_directory(
+                await iec61850_client.get_logical_node_directory(
                     "LD0", "LLN0", "dataObject", websocket_info, None, None
                 )
-                ds_directory = await iec61850_client.get_dataset_directory(
+                await iec61850_client.get_dataset_directory(
                     "LD0", "LLN0", "DataSetMinMaxAvg", websocket_info, None, None
                 )
-                set_urcb_res = await iec61850_client.set_URCB_values(urcb, websocket_info, None, None)
-                da_def = await iec61850_client.get_data_definition("LD0/DWMX1.WMaxSptPct", websocket_info, None, None)
-
-                set_da_res = await iec61850_client.set_data_values(
+                await iec61850_client.set_URCB_values(urcb, websocket_info, None, None)
+                await iec61850_client.get_data_definition(
+                    "LD0/DWMX1.WMaxSptPct", websocket_info, None, None
+                )
+                await iec61850_client.set_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper",
                     "co",
                     [data_attribute_value],
@@ -193,17 +187,14 @@ async def add_iec61850_client_requests(iec61850_client, ws_server):
                     None,
                     None,
                 )
-                da_val = await iec61850_client.get_data_values(
+                await iec61850_client.get_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper", "co", True, websocket_info, None, None
                 )
 
             except Exception as e:
-                logger.info("handler not called:", e)
-
-
-async def add_iec61850_clients(server, cp):
-    iec61850_client = IEC61850Client(cp)
-    server.add_iec61850_client(iec61850_client)
+                logger.exception(
+                    "Service call failed for %s: %s", iec61850_client.cp, e
+                )
 
 
 CREDENTIALS_FILE = "data/client_credentials.json"
@@ -214,10 +205,9 @@ token_issuer = f"{BASE}/realms/{TARGET_REALM}"
 
 
 async def main():
-    # TLS config for server
-    tls_config = TLSConfiguration(cert_path=cert_path, key_path=key_path, is_ws_server=True)
+    tls_config = TLSConfig(mode="server", certfile=cert_path, keyfile=key_path)
 
-    ep_ws_server = WebSocketEndpoint(
+    endpoint = PassiveEndpoint(
         oauth_enable=True,
         tls_config=tls_config,
         cert_endpoint=cert_endpoint,
@@ -228,22 +218,23 @@ async def main():
     credentials_path = resolve_credentials_path(CREDENTIALS_FILE)
     credentials = load_credentials(credentials_path)
 
-    logger.info(f"Starting loading of {len(credentials)} clients...")
-    for i, client_config in enumerate(credentials):
-        # Assign IED Model based on client ID number
+    clients = []
+    logger.info("Starting loading of %s clients...", len(credentials))
+    for client_config in credentials:
         pocc_id = client_config["pocc_id"]
-        logger.info(f"Registering IEC61850 Client with ID: {pocc_id}")
-        await add_iec61850_clients(ep_ws_server, pocc_id)
+        logger.info("Registering IEC61850 Client with ID: %s", pocc_id)
+        client = IEC61850Client(pocc_id)
+        endpoint.add_iec61850_client(client)
+        clients.append(client)
 
-    server_task = asyncio.create_task(ep_ws_server.start("passive", "localhost", 8765))
+    server_task = asyncio.create_task(endpoint.start("localhost", 8765))
 
     await asyncio.sleep(2)
 
-    request_tasks = []
-    for client in ep_ws_server.client_list:
-        task = asyncio.create_task(add_iec61850_client_requests(client, ep_ws_server))
-        request_tasks.append(task)
-
+    request_tasks = [
+        asyncio.create_task(add_iec61850_client_requests(client, endpoint))
+        for client in clients
+    ]
     await asyncio.gather(*request_tasks)
 
     await server_task

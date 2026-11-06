@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 
 import requests
-import urllib3
 
 # Ensure the project root is on sys.path so that `testing` is importable
 # when this script is run directly (outside of pytest).
@@ -41,7 +40,7 @@ DEFAULT_NUM_CLIENTS = 10
 DEFAULT_CREDENTIALS_FILE = "client_credentials_{batch_name}.json"
 REQUEST_TIMEOUT_SECONDS = 15
 
-BASE = os.environ.get("KEYCLOAK_URL", "http://localhost:8080")
+BASE = os.environ.get("KEYCLOAK_URL", "http://localhost:8081")
 admin_realm = os.environ.get("KEYCLOAK_REALM", "master")
 admin_username = os.environ.get("KEYCLOAK_ADMIN_USER", "admin")
 admin_password = os.environ.get("KEYCLOAK_ADMIN_PASSWORD", "admin")
@@ -83,7 +82,12 @@ def _get_admin_token() -> str | None:
         "grant_type": "password",
     }
     try:
-        response = requests.post(token_endpoint, data=token_data, verify=False, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests.post(
+            token_endpoint,
+            data=token_data,
+            verify=False,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
         return response.json().get("access_token")
     except requests.exceptions.RequestException as error:
@@ -116,7 +120,9 @@ def _create_client(admin_token: str, client_name: str):
     }
     try:
         logger.info("Created client %s", client_name)
-        kc_post(f"{BASE}/admin/realms/{TARGET_REALM}/clients", admin_token, json=payload)
+        kc_post(
+            f"{BASE}/admin/realms/{TARGET_REALM}/clients", admin_token, json=payload
+        )
         client = _get_client_by_client_id(admin_token, TARGET_REALM, client_name)
         logger.info("Client '%s' created successfully", client["id"])
         return client
@@ -159,7 +165,9 @@ def provision_clients(
 
     credentials: list[dict[str, str]] = []
     if credentials_file_path is None:
-        credentials_file_path = DEFAULT_CREDENTIALS_FILE.format(batch_name=f"start{start_id}_count{num_clients_to_gen}")
+        credentials_file_path = DEFAULT_CREDENTIALS_FILE.format(
+            batch_name=f"start{start_id}_count{num_clients_to_gen}"
+        )
     else:
         credentials = load_credentials(credentials_file_path)
 
@@ -172,7 +180,9 @@ def provision_clients(
             continue
         service_client_uuid = service_client["id"]
 
-        client_secret = _get_client_secret(admin_token, TARGET_REALM, service_client_uuid)
+        client_secret = _get_client_secret(
+            admin_token, TARGET_REALM, service_client_uuid
+        )
         if not client_secret:
             continue
         credentials.append(
@@ -188,6 +198,10 @@ def provision_clients(
         logger.warning("No client credentials were provisioned.")
         return []
 
-    logger.info("Saving %s provisioned credentials to %s", len(credentials), credentials_file_path)
+    logger.info(
+        "Saving %s provisioned credentials to %s",
+        len(credentials),
+        credentials_file_path,
+    )
     save_credentials(credentials_file_path, credentials)
     return credentials

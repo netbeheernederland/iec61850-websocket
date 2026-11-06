@@ -34,28 +34,34 @@ This project follows the following [Code of Conduct](CODE_OF_CONDUCT.md).
 ## REUSE compliance and source code headers
 
 All the files in the repository need to be [REUSE compliant](https://reuse.software/).
-We use the pipeline to automatically check this.
-If there are files that are not complying, the pipeline will fail the pull request will be blocked.
+The `reuse` job in CI checks this on every push and pull request and fails if any file lacks copyright or license information.
+Check locally before you push:
+
+```bash
+uvx reuse lint
+```
 
 This means that every file containing source code must include copyright and license information. This includes any
 JS/CSS files that you might be serving out to browsers. (This is to help well-intentioned people avoid accidental
 copying that doesn't comply with the license.)
 
-Apache 2.0 header:
+Apache 2.0 header for a new file, in the comment syntax of the file (use the current year):
 
 ```text
-    SPDX-FileCopyrightText: Copyright Contributors to the <YOUR PROJECT NAME> project <YOUR_PROJECT_EMAIL_ADRESS@alliander.com>
-    SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+SPDX-License-Identifier: Apache-2.0
 ```
+
+`uvx reuse annotate --copyright "Netbeheer Nederland" --license Apache-2.0 <file>` adds it for you. Files that can't
+carry a comment (images, JSON, lock files) are covered by a path entry in `REUSE.toml`; add new ones there. The license
+texts are in `LICENSES/`.
 
 ## Git branching
 
-This project uses the [Gitflow Workflow](https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow)
-and branching model. The `main` branch always contains the latest release; after a release is made new feature branches
-are branched of `develop`. When a feature is finished it is merged back into `develop`. At the end of a sprint `develop`
-is merged back into `main` or (optional) into a `release` branch first before it is merged into `main`.
-
-![Gitflow](img/gitflow.svg)
+`main` is the default branch and holds the latest reviewed state. Work happens on topic branches with a short,
+descriptive name (for example `code-clean-up` or `rti-demo-docker-optimization`) and reaches `main` through a pull
+request. A larger effort can use a longer-lived integration branch (such as `initial-refactor`): topic branches merge
+into it, and it merges into `main` by pull request when the effort is done.
 
 ## Signing the Developer Certificate of Origin (DCO)
 
@@ -103,17 +109,45 @@ if you're unfamiliar with this concept.
 
 Follow this process for a code change and pull request:
 
-1. Create a topic branch in your local repository, following the naming format "feature-[description]". For more
-   information see the Git branching guideline.
+1. Create a topic branch in your local repository with a short, descriptive name (see [Git branching](#git-branching)).
 1. Make changes, compile, and test thoroughly. Ensure any install or build dependencies are removed before the end of
    the layer when doing a build. Code style should match existing style and conventions, and changes should be focused
-   on the topic the pull request will be addressed. For more information see the style guide.
+   on the topic the pull request will be addressed. Python style is enforced by `ruff` (configured in
+   `pyproject.toml`); the HMI follows [docs/rti-demo/design/style-guide.md](docs/rti-demo/design/style-guide.md).
+1. Run the checks CI runs (see [Before you push](#before-you-push)), and update the documentation your change affects:
+   the module's README, and anything under `docs/` that describes it.
 1. Push commits to your branch.
 1. Create a GitHub pull request from your topic branch.
 1. Pull requests will be reviewed by one of the maintainers who may discuss, offer constructive feedback, request
-   changes, or approve the work. For more information see the Code review guideline.
+   changes, or approve the work. See [Code reviews](#code-reviews).
 1. Upon receiving the sign-off from one of the maintainers you may merge your changes. If you do not have permission to
    do that, you may request a maintainer to merge it for you.
+
+## Before you push
+
+CI (`.github/workflows/ci.yml`) runs these on every push, on any branch, and on pull requests into `main`; run them locally first, from the repository root:
+
+```bash
+uv sync --locked --all-packages
+uv run ruff check .
+uv run ruff format --check .      # `uv run ruff format .` fixes the formatting
+uv run pytest tests/unit -q
+```
+
+CI also runs `scripts/smoke-test.sh` (the first-run check from `docs/getting-started.md`), the rti-demo modules' tests
+and the HMI's tests and build (the commands in `examples/rti-demo/TESTING.md`, *Running everything in one go*), and
+checks the links in the Markdown documentation with [lychee](https://lychee.cli.rs/). If you changed documentation,
+check the links with:
+
+```bash
+docker run --rm -v "$PWD":/input -w /input lycheeverse/lychee:0.24.2 --config lychee.toml '**/*.md'
+```
+
+If you changed an rti-demo module, run its tests before you push, for example
+`uv run --package bff pytest examples/rti-demo/modules/bff/tests -q` (the IO server's tests, in
+`examples/rti-plugins/dr_panel`, run in the fsp environment:
+`uv run --package fsp pytest examples/rti-plugins/dr_panel/tests -q`), and for the HMI `npm test` in
+`examples/rti-demo/modules/hmi` (see `examples/rti-demo/TESTING.md`).
 
 ## Attribution
 

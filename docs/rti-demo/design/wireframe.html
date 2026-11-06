@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RTI Demo HMI — Wireframes</title>
+<style>
+  :root {
+    --wf-bg: #ffffff;
+    --wf-line: #6b7280;
+    --wf-line-soft: #9ca3af;
+    --wf-fill: #f3f4f6;
+    --wf-fill-soft: #fafafa;
+    --wf-accent: #374151;
+    --wf-text: #1f2937;
+    --wf-muted: #9ca3af;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', Helvetica, Arial, sans-serif;
+    color: var(--wf-text);
+    background: #e5e7eb;
+  }
+  .page-shell {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  .title-block {
+    margin-bottom: 20px;
+  }
+  .title-block h1 {
+    margin: 0 0 4px;
+    font-size: 22px;
+  }
+  .title-block p {
+    margin: 0;
+    color: #4b5563;
+    font-size: 13px;
+  }
+  .picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .picker button {
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--wf-line-soft);
+    background: #fff;
+    color: var(--wf-text);
+    cursor: pointer;
+  }
+  .picker button.active {
+    background: var(--wf-accent);
+    color: #fff;
+    border-color: var(--wf-accent);
+  }
+  .screen { display: none; }
+  .screen.active { display: block; }
+
+  .frame {
+    display: flex;
+    border: 2px solid var(--wf-line);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--wf-bg);
+    min-height: 640px;
+  }
+
+  /* ---- Sidebar ---- */
+  .wf-sidebar {
+    width: 170px;
+    flex: 0 0 170px;
+    border-right: 2px solid var(--wf-line);
+    background: var(--wf-fill-soft);
+    padding: 14px 0;
+  }
+  .wf-logo {
+    padding: 0 14px 14px;
+    border-bottom: 1px dashed var(--wf-line-soft);
+    margin-bottom: 10px;
+  }
+  .wf-logo .box { height: 14px; width: 70%; }
+  .wf-logo .sub { height: 8px; width: 50%; margin-top: 6px; }
+  .wf-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 14px;
+    font-size: 12px;
+    color: #4b5563;
+  }
+  .wf-nav-item .dot { width: 10px; height: 10px; border: 1.5px solid var(--wf-line); border-radius: 3px; flex: none; }
+  .wf-nav-item.active { background: #fff; border-left: 3px solid var(--wf-accent); font-weight: 600; color: var(--wf-text); }
+
+  /* ---- Header ---- */
+  .wf-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .wf-header {
+    height: 46px;
+    border-bottom: 2px solid var(--wf-line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    background: var(--wf-fill-soft);
+  }
+  .wf-header .crumb { height: 10px; width: 120px; background: var(--wf-fill); border: 1px dashed var(--wf-line-soft); }
+  .wf-header .actions { display: flex; gap: 8px; }
+  .wf-header .icon { width: 22px; height: 22px; border: 1.5px solid var(--wf-line-soft); border-radius: 50%; }
+
+  .wf-content { padding: 18px; overflow: auto; flex: 1; }
+
+  /* ---- Generic wireframe primitives ---- */
+  .box { background: var(--wf-fill); border: 1.5px dashed var(--wf-line-soft); }
+  .line { background: var(--wf-fill); border: 1px dashed var(--wf-line-soft); }
+  .placeholder-text { color: var(--wf-muted); font-size: 11px; font-style: italic; }
+
+  .wf-page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .wf-h1 { height: 20px; width: 220px; background: var(--wf-fill); border: 1.5px dashed var(--wf-line-soft); position: relative; }
+  .wf-h1::after { content: attr(data-label); position: absolute; left: 8px; top: 2px; font-size: 13px; font-weight: 700; color: var(--wf-text); font-style: normal; }
+  .wf-badge { height: 20px; padding: 0 10px; border-radius: 10px; background: #d1d5db; display: inline-flex; align-items: center; font-size: 10px; color: #374151; margin-left: 10px; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    padding: 0 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    border: 1.5px solid var(--wf-line);
+  }
+  .btn-solid { background: #d1d5db; font-weight: 600; }
+  .btn-outline { background: #fff; }
+  .btn-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  /* Inline result of the action right above it (e.g. a TLS/OAuth save) -
+     sits directly under its button row, not under a later section header. */
+  .wf-alert { display: flex; align-items: center; gap: 8px; margin: -6px 0 16px; padding: 8px 12px; border: 1.5px solid var(--wf-line); border-left-width: 4px; border-radius: 5px; background: var(--wf-fill); font-size: 11px; }
+  .wf-alert .icon { width: 12px; height: 12px; border: 1.5px solid var(--wf-line); border-radius: 50%; flex: none; }
+  .wf-alert .note { margin-left: auto; color: var(--wf-muted); font-style: italic; font-size: 10px; }
+
+  .field-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+  .field .label { font-size: 10px; color: #6b7280; }
+  .field .input { height: 30px; border: 1.5px dashed var(--wf-line-soft); border-radius: 5px; background: var(--wf-fill); }
+  .field .hint { font-size: 9px; color: var(--wf-muted); font-style: italic; }
+
+  .section-card {
+    border: 1.5px solid var(--wf-line-soft);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 16px;
+    background: var(--wf-fill-soft);
+  }
+  .section-card h3 { margin: 0 0 10px; font-size: 12px; }
+
+  .accordion { border: 1.5px solid var(--wf-line-soft); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+  .accordion-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: var(--wf-fill-soft); font-size: 12px; font-weight: 600; }
+  .accordion-head .chev { font-size: 10px; color: var(--wf-muted); }
+  .accordion-body { padding: 14px; border-top: 1.5px dashed var(--wf-line-soft); }
+
+  .table-wf { border: 1.5px solid var(--wf-line-soft); border-radius: 8px; overflow: hidden; }
+  .table-wf .thead { display: flex; background: var(--wf-fill); font-size: 10px; font-weight: 700; padding: 8px 12px; }
+  .table-wf .trow { display: flex; padding: 8px 12px; border-top: 1px dashed var(--wf-line-soft); font-size: 11px; align-items: center; }
+  .table-wf .cell { flex: 1; }
+  .table-wf .cell.narrow { flex: 0 0 70px; }
+  .status-pill { display: inline-block; padding: 1px 8px; border-radius: 8px; border: 1.5px solid var(--wf-line); font-size: 10px; }
+  .status-pill.off { border-style: dashed; }
+  .dot-status { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--wf-line); display: inline-block; margin-right: 6px; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .endpoint-card { display: flex; align-items: center; gap: 10px; border: 1.5px solid var(--wf-line-soft); border-radius: 8px; padding: 12px; background: var(--wf-fill-soft); }
+  .endpoint-card.highlighted { border-color: var(--wf-accent); background: #fff; }
+  .endpoint-card .icon-tile { width: 34px; height: 34px; border-radius: 6px; border: 1.5px solid var(--wf-line); flex: none; position: relative; }
+  .endpoint-card .meta { flex: 1; min-width: 0; }
+  .endpoint-card .meta .name { height: 10px; width: 70%; background: var(--wf-fill); border: 1px dashed var(--wf-line-soft); margin-bottom: 6px; }
+  .endpoint-card .meta .sub { height: 8px; width: 45%; background: var(--wf-fill); border: 1px dashed var(--wf-line-soft); }
+  .endpoint-card .pill { width: 40px; height: 16px; border-radius: 8px; border: 1.5px solid var(--wf-line-soft); flex: none; }
+  /* Live counter badge (e.g. RTI-SO's connected-FSP count) - filled dark so
+     it reads as "on"/highlighted even in this doc's otherwise line-only,
+     colorless language. */
+  /* TLS / OAuth badges on an SO/FSP: TLS top left, OAuth bottom left (the
+     SO's counter keeps the top right). Shown only while that setting is on. */
+  .sec-badge { position: absolute; left: -22px; height: 14px; padding: 0 4px; border-radius: 7px; background: var(--wf-accent); color: #fff; font-size: 8px; font-weight: 700; display: flex; align-items: center; white-space: nowrap; border: 1.5px solid #fff; }
+  .sec-badge.tls { top: -9px; }
+  .sec-badge.oauth { bottom: -9px; }
+  /* Plugin badge bottom right: the SO/FSP's plugin count; dashed while one is
+     unhealthy or unreachable (red in the HMI). Shown only while it has plugins. */
+  .plug-badge { position: absolute; right: -14px; bottom: -9px; height: 14px; padding: 0 4px; border-radius: 7px; background: #6b7280; color: #fff; font-size: 8px; font-weight: 700; display: flex; align-items: center; white-space: nowrap; border: 1.5px solid #fff; }
+  .plug-badge.problem { background: #fff; color: var(--wf-accent); border: 1.5px dashed var(--wf-accent); }
+  /* Attached boxes (decision 0025): what a plugin attaches, next to its SO/FSP. */
+  .attached-box { width: 120px; border: 1.5px solid var(--wf-line-soft); border-left: 4px solid var(--wf-accent); border-radius: 6px; padding: 5px 7px; font-size: 9px; background: #fff; }
+  .attached-box.degraded { border-left-style: dashed; }
+  .attached-box.disconnected { border-left-style: dotted; border-left-width: 5px; }
+  .attached-box .t { font-weight: 700; margin-bottom: 3px; }
+  .attached-box .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--wf-line-soft); margin-right: 2px; vertical-align: middle; }
+  .attached-box .dot.on { background: var(--wf-accent); }
+  .attached-box .lcd { font-family: monospace; border: 1px solid var(--wf-line-soft); padding: 2px 4px; margin-top: 2px; }
+  /* Plug tag on a model tree data object whose Operate a plugin answers. */
+  .plug-tag { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid var(--wf-line-soft); border-radius: 8px; font-size: 9px; color: var(--wf-muted); }
+  /* A select whose placeholder option is its label (the certificate directory). */
+  .input.select { position: relative; margin-bottom: 6px; }
+  .input.select::after { content: attr(data-label) "  ▾"; position: absolute; left: 6px; top: 50%; transform: translateY(-50%); font-size: 9px; color: var(--wf-muted); }
+  .count-badge { position: absolute; top: -8px; right: -8px; width: 18px; height: 18px; border-radius: 50%; background: var(--wf-accent); color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 1.5px solid #fff; }
+
+  .modal-overlay { border: 2px dashed var(--wf-line); border-radius: 10px; padding: 16px; background: #fff; margin-top: 18px; position: relative; }
+  .modal-overlay::before { content: "MODAL (on top of page)"; position: absolute; top: -11px; left: 14px; background: #fff; padding: 0 6px; font-size: 9px; color: var(--wf-muted); letter-spacing: .04em; }
+  .modal-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .modal-title .t { font-size: 13px; font-weight: 700; }
+  .modal-title .x { font-size: 14px; color: var(--wf-muted); }
+  .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+
+  .tree-wf { border: 1.5px dashed var(--wf-line-soft); border-radius: 6px; padding: 10px 12px; font-size: 11px; }
+  .tree-wf .node { padding: 3px 0; color: #4b5563; }
+  .tree-wf .node.l1 { padding-left: 0; font-weight: 600; }
+  .tree-wf .node.l2 { padding-left: 16px; }
+  .tree-wf .node.l3 { padding-left: 32px; color: var(--wf-muted); }
+
+  .legend { margin-top: 18px; font-size: 11px; color: #4b5563; display: flex; gap: 18px; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 14px; height: 14px; border: 1.5px dashed var(--wf-line-soft); background: var(--wf-fill); border-radius: 3px; }
+  .legend .swatch.solid { border-style: solid; background: #d1d5db; }
+</style>
+</head>
+<body>
+<div class="page-shell">
+
+  <div class="title-block">
+    <h1>RTI Demo HMI — Low-fidelity Wireframes</h1>
+    <p>Structural layout reference for the screens in <code>hmi/</code>, grouped by route. Grayscale/dashed boxes only — see <code>style-guide.md</code> in this folder for the actual visual design (colors, tokens, component classes).</p>
+  </div>
+
+  <div class="picker" id="picker"></div>
+
+  <!-- ============ OVERVIEW ============ -->
+  <section class="screen" data-screen="overview">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="Overview"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div><div class="icon"></div></div></div>
+        <div class="wf-content">
+          <div class="wf-page-header">
+            <div class="wf-h1" data-label="Overview"></div>
+          </div>
+          <p class="placeholder-text" style="margin:-10px 0 16px;">ⓘ Read-only - the graphic below just reflects live status and updates itself (no refresh button). The instance table, and registering, editing or deleting an instance, live on the Connections page instead.</p>
+
+          <div class="section-card">
+            <h3>Instance Visualization (InstanceVisualization component)</h3>
+            <p class="placeholder-text" style="margin:0 0 10px;">ⓘ The SO card (first, below) highlights and shows a live badge with its count of currently-connected FSPs (from the SO's own /api/properties → acsi_client_list) - highlighted/badge "on" as soon as one FSP is connected, cleared back to plain/0 when none are. 🔒 TLS (top left) and 🔑 OAuth (bottom left) badges mark an SO or FSP whose saved TLS / OAuth setting is on: its WebSocket runs over TLS (wss), its associations are authenticated with an OAuth 2.0 access token (the FSP presents one, the SO validates it). Tooltip: TLS version / role and IDP. Nothing shown while off. 🔌 plugin badge (bottom right) on an SO or FSP with plugins: its plugin count, coloured for the worst plugin state: green while all are connected and running, orange while one is unhealthy (its last event or Operate failed), red (dashed here) while one is disconnected - tooltip "1 plugin, all connected and running" or "Plugins: display disconnected - &lt;reason&gt;". The same colours as the Plugins panel's Healthy / Unhealthy / Unreachable. From the instance's GET /api/plugins, which the BFF reads in its 2s connection check and pushes as <code>plugins</code>. Nothing shown while it has none.</p>
+            <div class="grid-cards">
+              <div class="endpoint-card highlighted"><div class="icon-tile"><span class="count-badge">2</span><span class="sec-badge tls">🔒 TLS</span><span class="sec-badge oauth">🔑 OAuth</span><span class="plug-badge">🔌 1</span></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+              <div class="endpoint-card"><div class="icon-tile"><span class="sec-badge tls">🔒 TLS</span><span class="sec-badge oauth">🔑 OAuth</span><span class="plug-badge problem">🔌 1</span></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+              <div class="endpoint-card"><div class="icon-tile"></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:flex-start;">
+              <div class="attached-box"><div class="t">▣ IO server</div><span class="dot on"></span>led1 <span class="dot"></span>led2<br>pot1 · 42 %</div>
+              <div class="attached-box degraded"><div class="t">▣ IO server</div>4 of 6 devices up<br><span class="dot"></span>led1 <span class="placeholder-text">(plugin unhealthy)</span></div>
+              <div class="attached-box"><div class="t">▭ lcd1</div><div class="lcd">FSP Connected: cp1</div></div>
+              <div class="attached-box"><div class="t">◫ Simulated LEDs</div><span class="dot"></span>red <span class="dot on"></span>green</div>
+              <div class="attached-box disconnected"><div class="t">🔌 display</div>Disconnected</div>
+            </div>
+            <p class="placeholder-text" style="margin:10px 0 0;">ⓘ Attached boxes (decision 0025, Overview and Traffic): what each SO's and FSP's plugins attach, from their GET &lt;url&gt;/attached, checked by the instance and pushed with <code>plugins</code>. A box per item - under the SO, to the right of an FSP (two columns from three items on): icon for its kind (IO server / IED / display / other) coloured for the item's own state (ok green, degraded orange, down red, unknown grey), label, a left edge coloured for its plugin's state (connected and running green; unhealthy, or not answering /attached, orange - dashed here; disconnected red - dotted here), and its live blocks small: LED dots, values, a display's text. A plugin that is disconnected has one box of its own: 🔌 its name, "Disconnected", red. Greyed while the item is down, the plugin couldn't say or is disconnected. Click → details: address, detail, plugin + version, last error, attached error. Plain text; a new plugin needs no HMI change.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CONNECTIONS ============ -->
+  <section class="screen" data-screen="connections">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="Connections"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+          <div class="wf-page-header">
+            <div class="wf-h1" data-label="Connections"></div>
+            <div class="btn btn-solid">+ Register Instance</div>
+          </div>
+          <div class="section-card">
+            <h3>Registered Instances</h3>
+            <div class="table-wf">
+              <div class="thead"><div class="cell narrow">Status</div><div class="cell">Name</div><div class="cell">Type</div><div class="cell">Host</div><div class="cell narrow">BFF Port</div><div class="cell narrow">Actions</div></div>
+              <div class="trow"><div class="cell narrow"><span class="status-pill">Connected</span></div><div class="cell placeholder-text">…</div><div class="cell placeholder-text">…</div><div class="cell placeholder-text">…</div><div class="cell narrow placeholder-text">…</div><div class="cell narrow placeholder-text">✎ 🗑</div></div>
+              <div class="trow"><div class="cell narrow"><span class="status-pill off">Disconnected</span></div><div class="cell placeholder-text">…</div><div class="cell placeholder-text">…</div><div class="cell placeholder-text">…</div><div class="cell narrow placeholder-text">…</div><div class="cell narrow placeholder-text">✎ 🗑</div></div>
+            </div>
+          </div>
+          <p class="placeholder-text" style="margin-top:10px;">The only place that lists instances in a table, and the only place to register, edit or delete one - Overview only shows the live graphic. The table updates live (no refresh button). The Status column is a Connected/Disconnected badge - green (<code>--success-color</code>) when connected, red (<code>--danger-color</code>, dashed here) when disconnected. A row is a connection from the BFF's <code>connections.json</code>, addressed by its name; its id (a UUID) isn't shown. 🗑 asks first, removes exactly that one connection, and alerts with the BFF's reason when the delete is refused.</p>
+
+          <div class="modal-overlay">
+            <div class="modal-title"><span class="t">Register / Edit Instance</span><span class="x">×</span></div>
+            <div class="field-row">
+              <div class="field"><span class="label">Name</span><div class="input"></div><span class="hint">Human-readable label for this instance; unique (case and surrounding spaces don't count)</span></div>
+              <div class="field"><span class="label">Type</span><div class="input"></div><span class="hint">Determines which fields below apply...</span></div>
+            </div>
+            <div class="field-row">
+              <div class="field"><span class="label">Host</span><div class="input"></div></div>
+              <div class="field"><span class="label">BFF Port</span><div class="input"></div><span class="hint">Port this instance's own BFF server...</span></div>
+              <div class="field"><span class="label">WS Port <em>(RTI-SO only)</em></span><div class="input"></div></div>
+              <div class="field"><span class="label">CP <em>(RTI-FSP only)</em></span><div class="input"></div><span class="hint">Connection point this FSP registers under</span></div>
+            </div>
+            <div class="field-row">
+              <div class="field"><span class="label">ACSI</span><div class="input"></div></div>
+              <div class="field"><span class="label">WebSocket Mode</span><div class="input"></div></div>
+            </div>
+            <div class="field-row">
+              <div class="field"><span class="label">Endpoint <em>(IDP-Server only)</em></span><div class="input"></div><span class="hint">e.g. http://keycloak:8080</span></div>
+            </div>
+            <p class="placeholder-text" style="margin:0 0 4px;">ⓘ OAuth and TLS are configured on the instance's own page (OAuth Config / TLS Config) - no OAuth fields here.</p>
+            <p class="placeholder-text" style="margin:0 0 4px;">ⓘ Save → POST /api/add-connection (register) or PUT /api/edit-connection/{name} (edit; the name URL-encoded, so <code>/</code>, <code>?</code> and <code>#</code> work). A name another connection has is refused (409) and an empty one (400): the modal stays open with an alert giving the BFF's reason, e.g. "A connection named 'FSP01' already exists (…); choose another name, or edit that one", and nothing of the edit is applied. Saving an unchanged registration again is fine.</p>
+            <div class="modal-footer"><div class="btn btn-outline">Cancel</div><div class="btn btn-solid">Save</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MODEL ============ -->
+  <section class="screen" data-screen="model">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="Model"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+          <div class="wf-page-header"><div class="wf-h1" data-label="Model" style="width:120px;"></div></div>
+          <div class="section-card">
+            <h3>InstanceVisualization — click a card to open its ACSI Client/Server page</h3>
+            <div class="grid-cards">
+              <div class="endpoint-card"><div class="icon-tile"></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+              <div class="endpoint-card"><div class="icon-tile"></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+              <div class="endpoint-card"><div class="icon-tile"></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+              <div class="endpoint-card"><div class="icon-tile"></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+            </div>
+          </div>
+          <p class="placeholder-text">Selecting a card navigates to /acsi-client or /acsi-server (by instance type) with that connection passed as router state.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TRAFFIC ============ -->
+  <section class="screen" data-screen="traffic">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="Traffic"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+          <div class="wf-page-header"><div class="wf-h1" data-label="Traffic" style="width:120px;"></div></div>
+          <p class="placeholder-text" style="margin:-8px 0 16px;">SOs, FSP and Instances</p>
+
+          <div class="section-card">
+            <h3>InstanceVisualization — same grid as Model</h3>
+            <p class="placeholder-text" style="margin:0 0 10px;">ⓘ On Traffic each SO–FSP line shows live activity: its cp, a dot per frame batch (→ request, ← response/report), → / ← / ⚑ / ✗ counters and the last service (✓/✗ + time); red while the last service failed. Clicking an FSP focuses its link (others dim, only its monitor listed); clicking it again, the SO or "Show all" unfocuses. "Reset counters" zeroes them. Only instances the BFF can reach are drawn (an unreachable FSP keeps a timeline lane only while it has rows). An FSP whose link to the SO dropped: dashed red circle, red line with ✗ and "link down · 42s"; "link down" / "unreachable" badged on its timeline lane, demo row and report values; "✗ link down" / "✓ link back up after 42s" rows in the timeline (Links filter). The 🔒 TLS / 🔑 OAuth and 🔌 plugin badges, and the attached boxes, are the same as on Overview; an FSP's boxes dim with it while another FSP is focused.</p>
+            <div class="grid-cards">
+              <div class="endpoint-card"><div class="icon-tile"><span class="sec-badge tls">🔒 TLS</span><span class="sec-badge oauth">🔑 OAuth</span></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+              <div class="endpoint-card"><div class="icon-tile"><span class="sec-badge tls">🔒 TLS</span><span class="sec-badge oauth">🔑 OAuth</span></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+              <div class="endpoint-card"><div class="icon-tile"></div><div class="meta"><div class="name"></div><div class="sub"></div></div><div class="pill"></div></div>
+            </div>
+          </div>
+
+          <div class="section-card">
+            <h3>Demo Actions — a row per FSP, "All FSPs" per shared label</h3>
+            <p class="placeholder-text" style="margin:0;">ⓘ Buttons pinned from a Data Access Panel on the SO ("Pin as demo action": service Read / Write / Operate, label, value) - or Enable / Disable report, pinned from the ACSI Client page's RCB Configure dialog (read RCB → write it back with rptEna on / off; already in that state = left alone). All FSPs [Read status (3)] [Setpoint 50 (2)] runs every FSP's action with that label. Each button: spinner → ✓ / ✗ (reason in tooltip); disabled while its SO / cp is down. Edit → × unpins. localStorage.</p>
+          </div>
+
+          <div class="section-card">
+            <h3>Timeline — SO and FSP lanes, newest first</h3>
+            <p class="placeholder-text" style="margin:0;">ⓘ Stop / Clear (view only) · Calls / Reports / Local filters. One row per exchange: call = arrow SO → its FSP (service ✓/✗/…, "SO n · FSP n frames"), report = arrow FSP → SO (a run of them with nothing between: one row per FSP + rptID, "report Events1 ×21 · 06:37:00 – 06:37:20 · every ~1s"), local FSP read/write = box in its lane. Click a row: the call's SO frames and FSP frames side by side. Paired by cp + invokeId, not by clock. Focusing an FSP shows only its lane.</p>
+          </div>
+
+          <div class="section-card">
+            <h3>Report Values (received by the SO) — a table per FSP</h3>
+            <p class="placeholder-text" style="margin:0;">ⓘ "FSP_North cp1 · 2 reports · last 12:00:04" then Data attribute | Value | Report (rptID) | Time - latest value per attribute; the ones the newest report changed highlighted. From the SO's received report frames, FSP by the frame's cp. Same Stop / Clear as the timeline.</p>
+          </div>
+
+          <div class="accordion">
+            <div class="accordion-head"><span>Data Access Panels &nbsp;<span class="placeholder-text">(+ / − adds/removes panels, one shown below)</span></span><span class="chev">▾</span></div>
+            <div class="accordion-body">
+              <div class="field-row">
+                <div class="field" style="min-width:240px;"><span class="label">Endpoint</span><div class="input"></div><span class="hint">ACSI: client / server</span></div>
+              </div>
+              <div class="btn-row">
+                <div class="btn btn-outline">Fetch Model</div>
+                <div class="field" style="min-width:110px;margin:0;"><div class="input"></div></div>
+              </div>
+              <div class="field-row">
+                <div class="field"><span class="label">LD</span><div class="input"></div></div>
+                <div class="field"><span class="label">LN</span><div class="input"></div></div>
+                <div class="field"><span class="label">DO</span><div class="input"></div></div>
+                <div class="field"><span class="label">DA / SDO</span><div class="input"></div></div>
+              </div>
+              <div class="section-card"><span class="placeholder-text">Object Reference: LD/LN.DO.DA [FC] …</span></div>
+              <div class="field-row">
+                <div class="field" style="min-width:260px;"><span class="label">Value to Write</span><div class="input"></div></div>
+              </div>
+              <div class="btn-row" style="margin-bottom:0;">
+                <div class="btn btn-solid">Read</div>
+                <div class="btn btn-outline">Write</div>
+                <div class="btn btn-outline">Operate</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="accordion" style="margin-top:16px;margin-bottom:0;">
+            <div class="accordion-head"><span>Message Monitors</span><span class="chev">▾</span></div>
+            <div class="accordion-body">
+              <p class="placeholder-text" style="margin:0 0 12px;">ⓘ ⇅ toggles the message list between newest-first (default) and oldest-first - same control as the Monitoring panels' Activity Log (ACSI Server / ACSI Client), added here too. Defaults to newest first even though messages are received and stored oldest-first. Each monitor's Start/Stop is remembered per instance (host:port) - leaving one on and switching pages resumes it when you come back; only Stop switches it off. The [All kinds ▾] filter narrows to WebSocket frames or ACSI service entries; each row starts with its kind badge (🔌 WebSocket · send/recv, service | ▣ ACSI · message, e.g. a local FSP read), and warn/error rows show their level. An ACSI row made through the SO (e.g. ▣ GetDataValues LD0/LLN0.Mod.stVal [ST] - ok · 🔌2) expands to its detail plus the WebSocket frames it produced (#11 send getDataValues, #12 recv getDataValues).</p>
+              <h3 style="margin:0 0 10px;font-size:11px;color:#6b7280;">ACSI Client Endpoints (RTI-SO)</h3>
+              <div class="grid-2" style="margin-bottom:20px;">
+                <div class="section-card" style="margin-bottom:0;">
+                  <div class="wf-page-header" style="margin-bottom:8px;">
+                    <div class="wf-h1" data-label="so1" style="height:16px;width:110px;"></div>
+                    <div style="display:flex;gap:6px;align-items:center;">
+                      <div class="input" style="height:22px;width:44px;"></div>
+                      <span class="placeholder-text">[All kinds ▾] ▶ ■ 🗑 ⇅</span>
+                    </div>
+                  </div>
+                  <p class="placeholder-text" style="margin:0 0 6px;">Monitoring stopped</p>
+                  <p class="placeholder-text" style="margin:0;">No messages. Select an endpoint and start monitoring to see WebSocket traffic.</p>
+                </div>
+                <div class="section-card" style="margin-bottom:0;">
+                  <div class="wf-page-header" style="margin-bottom:8px;">
+                    <div class="wf-h1" data-label="so2" style="height:16px;width:110px;"></div>
+                    <div style="display:flex;gap:6px;align-items:center;">
+                      <div class="input" style="height:22px;width:44px;"></div>
+                      <span class="placeholder-text">[All kinds ▾] ▶ ■ 🗑 ⇅</span>
+                    </div>
+                  </div>
+                  <p class="placeholder-text" style="margin:0 0 6px;">Monitoring stopped</p>
+                  <p class="placeholder-text" style="margin:0;">No messages. Select an endpoint and start monitoring to see WebSocket traffic.</p>
+                </div>
+              </div>
+
+              <h3 style="margin:0 0 10px;font-size:11px;color:#6b7280;">ACSI Server Endpoints (RTI-FSP)</h3>
+              <p class="placeholder-text" style="margin:0 0 10px;">ⓘ Only FSPs with an active connection get a card here (connectedClients &gt; 0 - the FSP's own live WebSocket connection count, same threshold that lights up its circle/connection line in the graphic above). An FSP with none is left out entirely, not shown greyed out.</p>
+              <div class="grid-2">
+                <div class="section-card" style="margin-bottom:0;">
+                  <div class="wf-page-header" style="margin-bottom:8px;">
+                    <div class="wf-h1" data-label="fsp1" style="height:16px;width:110px;"></div>
+                    <div style="display:flex;gap:6px;align-items:center;">
+                      <div class="input" style="height:22px;width:44px;"></div>
+                      <span class="placeholder-text">[All kinds ▾] ▶ ■ 🗑 ⇅</span>
+                    </div>
+                  </div>
+                  <p class="placeholder-text" style="margin:0 0 6px;">Monitoring stopped</p>
+                  <p class="placeholder-text" style="margin:0;">No messages. Select an endpoint and start monitoring to see WebSocket traffic.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DIAGNOSTICS ============ -->
+  <section class="screen" data-screen="diagnostics">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="Diagnostics"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+          <div class="wf-page-header"><div class="wf-h1" data-label="Diagnostics" style="width:150px;"></div></div>
+          <p class="placeholder-text" style="margin:-10px 0 16px;">ⓘ "Is the system healthy?" - the BFF's own events (an instance coming up / dropping, TLS/OAuth re-apply results, the startup IDP check) merged with every reachable SO/FSP's System entries. Errors and warnings first, then newest first. Re-read every 5s while open - no refresh button. ACSI service and WebSocket entries live on Traffic instead.</p>
+          <div class="btn-row" style="justify-content:space-between;">
+            <span class="placeholder-text">12 entries · 1 error · 2 warnings</span>
+            <span class="placeholder-text">[All sources ▾] [All but debug ▾]</span>
+          </div>
+          <div class="section-card">
+            <div class="trow"><div class="cell placeholder-text"><b>SO</b> - 10:00:03</div><div class="cell placeholder-text">Endpoint failed to start</div><div class="cell narrow placeholder-text">⚙ System · error</div></div>
+            <div class="trow"><div class="cell placeholder-text"><b>BFF</b> · FSP01 - 10:00:02</div><div class="cell placeholder-text">FSP01 stopped responding</div><div class="cell narrow placeholder-text">⚙ System · warn</div></div>
+            <div class="trow"><div class="cell placeholder-text"><b>SO</b> - 10:00:01</div><div class="cell placeholder-text">Connected to server</div><div class="cell narrow placeholder-text">⚙ System · info</div></div>
+          </div>
+          <p class="placeholder-text" style="margin-top:6px;">ⓘ Debug entries (e.g. the SO's TLS/OAuth reconfiguration steps) are hidden by default; "All levels" shows them, "Errors &amp; warnings" narrows further.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TOOLS ============ -->
+  <section class="screen" data-screen="tools">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="Tools"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+          <div class="wf-page-header"><div class="wf-h1" data-label="Tools" style="width:110px;"></div></div>
+          <div class="grid-2">
+            <div class="section-card"><h3>Utility panel A</h3><div class="line" style="height:60px;"></div></div>
+            <div class="section-card"><h3>Utility panel B</h3><div class="line" style="height:60px;"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="screen" data-screen="settings">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="Settings"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+          <div class="wf-page-header"><div class="wf-h1" data-label="Settings" style="width:130px;"></div></div>
+          <div class="section-card">
+            <h3>BFF connection</h3>
+            <div class="field-row">
+              <div class="field"><span class="label">BFF Host</span><div class="input"></div></div>
+              <div class="field"><span class="label">BFF Port</span><div class="input"></div></div>
+            </div>
+            <div class="field-row">
+              <div class="field"><span class="label">BFF log level ▾</span><div class="input"></div><span class="hint">As started (info, from LOG_LEVEL) / critical / error / warning / info / debug / trace. In use: debug, set from the HMI at 14:02</span></div>
+            </div>
+            <p class="placeholder-text" style="margin:10px 0 0;">ⓘ Spec 0010. The BFF's own log level: GET /api/log-level after each connection check that succeeds, PUT /api/log-level as soon as a level is chosen ("As started" sends null). For every user, until the BFF restarts; nothing kept in the browser. Disabled, "Connect to the BFF to see its log level.", while the BFF isn't connected. A refusal shows the BFF's reason under the select, which goes back to the BFF's level.</p>
+          </div>
+          <div class="section-card">
+            <h3>Logging</h3>
+            <div class="field-row">
+              <div class="field"><span class="label">HMI log level (this browser) ▾</span><div class="input"></div><span class="hint">From the server (info) / critical / error / warning / info / debug / trace - applies straight away, kept in this browser. In use: debug (from LOG_LEVEL)</span></div>
+            </div>
+            <p class="placeholder-text" style="margin:10px 0 0;">ⓘ Spec 0008. What the HMI logs in the browser console. Highest first: ?log=&lt;level&gt; in the URL (until a reload without it; the hint then says so), this choice, the container's LOG_LEVEL, the build's (--log-level / LOG_LEVEL of npm run dev or build), info.</p>
+          </div>
+          <div class="section-card">
+            <h3>Refresh intervals</h3>
+            <div class="field-row">
+              <div class="field"><span class="label">Auto-refresh interval</span><div class="input"></div></div>
+            </div>
+            <div class="btn btn-solid">Save Settings</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ACSI SERVER (FSP) ============ -->
+  <section class="screen" data-screen="acsi-server">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="none"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+
+          <div class="wf-page-header"><div class="wf-h1" data-label="WebSocket Connection" style="width:230px;"></div></div>
+
+          <div class="section-card">
+            <div class="field-row">
+              <div class="field" style="min-width:260px;"><span class="label">Instance</span><div class="input"></div><span class="hint">Stop the server to switch to a different instance</span></div>
+            </div>
+            <div class="field-row">
+              <div class="field"><span class="label">WS Host</span><div class="input"></div></div>
+              <div class="field"><span class="label">WS Port</span><div class="input"></div></div>
+              <div class="field"><span class="label">WS Mode</span><div class="input"></div></div>
+            </div>
+          </div>
+
+          <div class="btn-row">
+            <div class="btn btn-solid">Connect</div>
+            <div class="btn btn-outline">Disconnect</div>
+            <div class="btn btn-outline">🛡 TLS Config</div>
+            <div class="btn btn-outline">🔑 OAuth Config</div>
+          </div>
+          <div class="wf-alert"><span class="icon"></span><span>TLS config saved and applied for FSP01</span><span class="note">Security action result (TLS / OAuth, success or error) - auto-dismisses</span></div>
+          <div class="wf-alert"><span class="icon"></span><span>Cannot connect to rti-so:8765 (still retrying): protocol mismatch - check whether TLS is enabled on one side …</span><span class="note">Dial-out failure (FSP status error) - stays until it connects or is disconnected</span></div>
+
+          <div class="wf-page-header">
+            <div class="wf-h1" data-label="ACSI Server" style="width:160px;"></div>
+          </div>
+
+
+          <div class="section-card">
+            <h3>Connection Status</h3>
+            <div class="grid-2">
+              <div class="field"><span class="label">Model</span><div class="line" style="height:16px;"></div></div>
+              <div class="field"><span class="label">State</span><div class="line" style="height:16px;"></div></div>
+            </div>
+          </div>
+
+          <div class="accordion">
+            <div class="accordion-head"><span>cp1 &nbsp;<span class="placeholder-text">(connection point — click to expand)</span></span><span class="chev">▾</span></div>
+            <div class="accordion-body">
+              <div class="btn-row">
+                <div class="btn btn-solid">Load Model</div>
+                <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#6b7280;"><span style="width:12px;height:12px;border:1.5px solid var(--wf-line-soft);display:inline-block;"></span>Auto-refresh read values</label>
+              </div>
+
+              <div class="tree-wf">
+                <div class="node l1">▾ IED_2</div>
+                <div class="node l2">▾ LD0</div>
+                <div class="node l3">LLN0 · Mod · Beh · Health</div>
+                <div class="node l3">LPHD1 · DWMX1 · MMXU1 …</div>
+                <div class="node l3">CSWI1 · Pos DPC <span class="plug-tag">🔌 io</span></div>
+              </div>
+              <p class="placeholder-text" style="margin:6px 0 0;">ⓘ 🔌 &lt;name&gt; on a data object whose Operate a plugin answers: the plugin claims its control attribute (LD0/CSWI1.Pos.Oper.ctlVal), the tag goes on the data object (LD0/CSWI1.Pos). Tooltip "Operate answered by plugin 'dr_panel'".</p>
+            </div>
+          </div>
+
+          <div class="section-card" id="plugins-panel-fsp">
+            <h3>🔌 Plugins (2) <span style="float:right;"><span class="btn btn-outline">Retry 1 plugin</span> <span class="btn btn-outline">Add plugin</span></span></h3>
+            <div class="table-wf">
+              <div class="thead"><span class="cell">Plugin</span><span class="cell">State</span><span class="cell">URL</span><span class="cell narrow">Controls</span><span class="cell narrow" style="flex-basis:110px;">Actions</span></div>
+              <div class="trow"><span class="cell">io 1.0</span><span class="cell">Healthy</span><span class="cell">http://dr-panel:9000/plugin</span><span class="cell narrow">1</span><span class="cell narrow" style="flex-basis:130px;">▴ ✎ ↗ ⧉ ⟳ 🗑</span></div>
+              <div class="trow" style="display:block;background:var(--wf-fill);">
+                <div class="placeholder-text" style="margin:0 0 4px;">▴ Details io:</div>
+                <div><b>Controls</b> LD0/CSWI1.Pos.Oper.ctlVal</div>
+                <div><b>Routes</b> /api/plugins/dr_panel/</div>
+                <div><b>Attached</b> ● IO server (io, 6 devices) http://dr-panel:9000 <span class="placeholder-text">- or the attached error, e.g. attached timed out after 1.0s</span></div>
+                <div><b>Settings</b> - <span class="placeholder-text">(or the settings JSON)</span></div>
+                <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><span class="btn btn-outline">GET ▾</span><span class="placeholder-text">/api/plugins/dr_panel/</span><span style="border:1.5px dashed var(--wf-line-soft);border-radius:5px;padding:2px 8px;">leds</span><span style="border:1.5px dashed var(--wf-line-soft);border-radius:5px;padding:2px 8px;">on=1</span><span class="btn btn-solid">Send</span> <span class="placeholder-text">(Body (JSON) editor under it for POST, PUT, PATCH)</span></div>
+                <div style="margin-top:4px;"><b>OK</b> <span class="placeholder-text">GET /api/plugins/dr_panel/leds?on=1</span></div>
+                <pre style="margin:2px 0 0;font-size:10px;">{ "leds": [ { "name": "red", "on": true } ] }</pre>
+              </div>
+              <div class="trow"><span class="cell">display</span><span class="cell">Unreachable<br><span class="placeholder-text">connection refused</span></span><span class="cell">http://pi:8000/plugin</span><span class="cell narrow">-</span><span class="cell narrow" style="flex-basis:130px;">▾ ✎ ↗ ⧉ ⟳ 🗑<br><span class="placeholder-text">⟳ = Retry now</span></span></div>
+            </div>
+            <div style="margin-top:10px;padding:10px;border: 1px dashed var(--wf-line-soft);border-radius:6px;">
+              <p class="placeholder-text" style="margin:0 0 6px;">⧉ Copy display as configuration - where the browser won't copy (plain HTTP), the entry is shown to copy by hand: <span style="float:right;">✕</span></p>
+              <pre style="margin:0;font-size:10px;">{ "name": "display", "url": "http://pi:8000/plugin", "settings": { "rotate": 90 } }</pre>
+            </div>
+            <div style="margin-top:10px;padding:10px;border: 1px dashed var(--wf-line-soft);border-radius:6px;">
+              <p class="placeholder-text" style="margin:0 0 6px;">✎ Edit display (the add form, filled in):</p>
+              <div class="field-row">
+                <div class="field"><span class="label">Name</span><div class="input"></div><span class="hint">display - fixed: another name is another plugin</span></div>
+                <div class="field"><span class="label">URL</span><div class="input"></div><span class="hint">http://pi:8000/plugin - a new one only if PLUGIN_ALLOWED_SOURCES allows it: an exact URL, wildcards (http://192.168.0.*:8000, http://*:9000) or * for any</span></div>
+              </div>
+              <div class="field-row">
+                <div class="field"><span class="label">Settings (JSON)</span><div class="input"></div><span class="hint">{"rotate": 90} - a JSON editor (highlighting, syntax errors marked while typing); replaces all of them; empty: none</span></div>
+              </div>
+              <div class="modal-footer"><div class="btn btn-outline">Cancel</div><div class="btn btn-solid">Save</div></div>
+            </div>
+            <div style="margin-top:10px;padding:10px;border: 1px dashed var(--wf-line-soft);border-radius:6px;">
+              <p class="placeholder-text" style="margin:0 0 6px;">↗ Add io to another instance (the add form, filled in, with where to add it):</p>
+              <div class="field-row">
+                <div class="field" style="flex:1;"><span class="label">Add to</span><div class="input select" data-label="rti-fsp02 (FSP, rti-fsp02:5005)"></div><span class="hint">the other connected FSPs (and the SO, for a plugin without claims); one that has io already is greyed: "- has io"</span></div>
+              </div>
+              <div class="field-row">
+                <div class="field"><span class="label">Name</span><div class="input"></div><span class="hint">io</span></div>
+                <div class="field"><span class="label">URL</span><div class="input"></div><span class="hint">http://dr-panel:9000/plugin - the other instance's PLUGIN_ALLOWED_SOURCES applies</span></div>
+              </div>
+              <div class="modal-footer"><div class="btn btn-outline">Cancel</div><div class="btn btn-solid">Add to instance</div></div>
+            </div>
+            <p class="placeholder-text" style="margin:10px 0 0;">ⓘ The instance's GET /api/plugins (through /api/execute), then followed from the BFF's connections push - a plugin that drops or comes back shows without polling. State: Healthy / Unhealthy (with last error) / Unreachable (with the reason; the instance retries every 10s). Controls: how many objRefs it answers Operate on (tooltip lists them). URL: from the plugin's definition, also for an unreachable one. ✎ Edit opens the add form filled with the plugin's definition (GET /api/plugins → definitions: URL and settings), the name fixed → Save: PUT /api/plugins/{name} {url, settings}; a new URL only if PLUGIN_ALLOWED_SOURCES allows it. A refused edit keeps the form open with the instance's reason, and the plugin keeps its old definition; an edit lasts until the instance restarts. ✎ is disabled for an instance that doesn't list definitions. ⟳ Reload (POST /api/plugins/{name}/reload), 🗑 Remove (DELETE /api/plugins/{name}, after a confirm). Add plugin: name, URL, settings (JSON, optional, in a CodeMirror JSON editor that marks a syntax error while typing; Save still refuses text that isn't JSON) → POST /api/plugins; only URLs the instance's PLUGIN_ALLOWED_SOURCES allows (exact, with wildcards such as http://192.168.0.*:8000, or * for any URL; decision 0037), as the form's hint says, and the instance's own refusal reason is shown. An added plugin lasts until the instance restarts. ▾ Details opens a row under the plugin: the objRefs it controls (FSP), its routes under /api/plugins/{name}/, what it attaches (from <code>attached</code>, with <code>attached_error</code>) and its settings; ▴ closes it. ⧉ Copy as configuration puts the plugin's entry for the instance's plugin configuration ({name, url, settings}, settings left out when empty) on the clipboard, with a "Copied" notice - the way to make an edit or an added plugin last; the clipboard needs HTTPS or localhost, so otherwise the entry is shown in the notice to copy by hand (✕ dismisses it). ⧉ is disabled, like ✎, without definitions. On an unreachable plugin ⟳ is "Retry now": the same reload, instead of waiting for the instance's 10s retry. Retry N plugins (header, only while one is unhealthy or unreachable) reloads each of them in turn and lists those that still fail in one alert. For a plugin with routes, Details has a request form for them (spec 0001): method (GET, POST, PUT, PATCH, DELETE), path under /api/plugins/{name}/, query (on=1&amp;color=red) and, for POST, PUT and PATCH, a JSON object body → Send through /api/execute. Anything but GET asks first ("... may change the plugin's state. Send?"); POST reload is refused (the instance's own Reload). The answer below: OK with the body (JSON pretty-printed, cut at 20 000 characters), or Failed with the instance's error, which carries the plugin's status. The form and its answer stay per plugin while the page is open. ↗ Add to another instance (spec 0002) opens the add form filled with the plugin's definition and a select of the other connected SOs and FSPs from the BFF's connections (only FSPs for a plugin with claims, as an SO answers no Operate; one that already has the plugin is greyed) → Add to instance: POST /api/plugins on that instance; "Added io to rti-fsp02." in a notice, and the other instance's panel shows it through the push. A refusal (409 name or claim taken, 403 source not allowed, 422 unreachable) shows that instance's reason and keeps the form open. ↗ is disabled, like ✎, without definitions.</p>
+          </div>
+
+          <div class="wf-page-header" style="margin-top:8px;"><div class="wf-h1" data-label="Monitoring" style="width:150px;"></div></div>
+          <div class="btn-row">
+            <div class="btn btn-solid">Start Monitor</div>
+            <div class="btn btn-outline">Stop Monitor</div>
+            <div class="btn btn-outline">Clear Logs</div>
+            <div class="field"><span class="label">Log level ▾</span><div class="input"></div><span class="hint">As started (info, from LOG_LEVEL) / critical / … / trace. In use: info, as started (from LOG_LEVEL)</span></div>
+          </div>
+          <div class="section-card"><span class="placeholder-text">Activity Log - [All kinds ▾] [All levels ▾] ⇅ · each row: #id - time · [⚙ System | ▣ ACSI] [level] · message</span></div>
+          <p class="placeholder-text" style="margin-top:6px;">ⓘ Kind (System / ACSI service) is an icon + label, filtered separately from severity - color stays for severity only. Start/Stop is remembered per instance - leaving monitoring on and switching pages resumes it when you come back. Only Stop Monitor switches it off.</p>
+          <p class="placeholder-text" style="margin-top:6px;">ⓘ Spec 0011. Log level: what the selected instance writes to its container log (docker logs), not a filter of the Activity Log, which shows every entry. GET /api/log-level through /api/execute when the page opens and when another instance is selected; PUT as soon as a level is chosen. The change shows as a System entry, "Log level set to DEBUG (was INFO) from the HMI". This instance only, until it restarts. Disabled while no instance is selected; a refusal goes to the page's message bar.</p>
+
+          <div class="modal-overlay">
+            <div class="modal-title"><span class="t">🛡 TLS Configuration - FSP01</span><span class="x">×</span></div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:12px;"><span style="width:12px;height:12px;border:1.5px solid var(--wf-line);display:inline-block;"></span>Enable TLS (WSS)</label>
+            <div class="field-row">
+              <div class="field" style="min-width:200px;"><span class="label">TLS Version</span><div class="input"></div><span class="hint">TLS 1.2 / TLS 1.3</span></div>
+            </div>
+            <div class="field-row">
+              <div class="field" style="flex:1;"><span class="label">Server CA Certificate (PEM) - file, certificate directory or paste</span><div class="input select" data-label="From the certificate directory…"></div><div class="input" style="height:48px;"></div><span class="hint">CA the SO's certificate is validated against</span></div>
+            </div>
+            <div class="section-card" style="padding:8px 12px;margin-bottom:12px;"><span style="font-size:11px;"><strong>Mode:</strong> Client (Active) - validates the SO's certificate</span></div>
+            <p class="placeholder-text" style="margin:0;">Opened by 🛡 TLS Config. Saved to the BFF; applied right away while connected, otherwise on the next Connect ("applies on next Connect"). The checkbox reflects the running FSP; version/certificate come from the saved settings while TLS is off. Button shows "(On)" while TLS is active. "From the certificate directory…" lists the BFF's <code>/certs</code> (GET /api/certs); picking a file stores <code>file:&lt;name&gt;</code>, which the instance reads from its own <code>/certs</code> - the PEM never passes through the browser.</p>
+            <div class="modal-footer"><div class="btn btn-outline">Cancel</div><div class="btn btn-solid">Save</div></div>
+          </div>
+
+          <div class="modal-overlay">
+            <div class="modal-title"><span class="t">🔑 OAuth Configuration - FSP01</span><span class="x">×</span></div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:12px;"><span style="width:12px;height:12px;border:1.5px solid var(--wf-line);display:inline-block;"></span>Enable OAuth 2.0</label>
+            <div class="field-row">
+              <div class="field" style="min-width:200px;"><span class="label">IDP Server</span><div class="input"></div><span class="hint">IDP-Server instance registered in Connections</span></div>
+              <div class="field" style="min-width:200px;"><span class="label">Realm</span><div class="input"></div></div>
+              <div class="field" style="justify-content:flex-end;"><div class="btn btn-outline">Discover endpoints</div></div>
+            </div>
+            <div class="field-row">
+              <div class="field" style="flex:1;"><span class="label">Token Endpoint</span><div class="input"></div><span class="hint">Filled by Discover endpoints</span></div>
+              <div class="field"><span class="label">Client ID</span><div class="input"></div></div>
+              <div class="field"><span class="label">Client Secret</span><div class="input"></div></div>
+            </div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:12px;"><span style="width:12px;height:12px;border:1.5px solid var(--wf-line);display:inline-block;"></span>Enable Token Refresh</label>
+            <div class="field-row">
+              <div class="field" style="flex:1;"><span class="label">Auth Server CA (PEM) - file, certificate directory or paste</span><div class="input select" data-label="From the certificate directory…"></div><div class="input" style="height:48px;"></div><span class="hint">Only needed for an IDP on HTTPS with a private CA</span></div>
+            </div>
+            <p class="placeholder-text" style="margin:0;">Opened by 🔑 OAuth Config. Client (Active) fields. Save stores the settings; applied right away while connected, otherwise on the next Connect. The Auth Server CA can be picked from the certificate directory, as in TLS Config (<code>file:&lt;name&gt;</code>).</p>
+            <div class="modal-footer"><div class="btn btn-outline">Cancel</div><div class="btn btn-solid">Save</div></div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ACSI CLIENT (SO) ============ -->
+  <section class="screen" data-screen="acsi-client">
+    <div class="frame">
+      <div class="wf-sidebar" data-active-nav="none"></div>
+      <div class="wf-main">
+        <div class="wf-header"><div class="crumb"></div><div class="actions"><div class="icon"></div></div></div>
+        <div class="wf-content">
+
+          <div class="wf-page-header"><div class="wf-h1" data-label="Websocket Connection" style="width:230px;"></div></div>
+
+          <div class="section-card">
+            <div class="field-row" style="margin-bottom:0;">
+              <div class="field"><span class="label">BFF Host</span><div class="input"></div></div>
+              <div class="field"><span class="label">BFF Port</span><div class="input"></div></div>
+              <div class="field"><span class="label">WS Host</span><div class="input"></div></div>
+              <div class="field"><span class="label">WS Port</span><div class="input"></div></div>
+            </div>
+            <p class="placeholder-text" style="margin:8px 0 0;">All four read-only — this is a fixed WebSocket Passive endpoint, not a dial-out connection (no Connect/Disconnect).</p>
+          </div>
+
+          <div class="btn-row">
+            <div class="btn btn-outline">🛡 TLS Config</div>
+            <div class="btn btn-outline">🔑 OAuth Config</div>
+          </div>
+          <div class="wf-alert"><span class="icon"></span><span>TLS config saved and applied for SO</span><span class="note">Security action result (TLS / OAuth, success or error) - auto-dismisses</span></div>
+
+          <div class="wf-page-header">
+            <div class="wf-h1" data-label="ACSI Client" style="width:160px;"></div>
+            <span class="wf-badge">rti-so:5002&nbsp;·&nbsp;AP: cp1</span>
+          </div>
+
+          <div class="section-card">
+            <h3>ACSI Clients (from properties API's acsi_client_list) — one accordion entry per connected client</h3>
+
+            <div class="accordion">
+              <div class="accordion-head"><span>cp1</span><span class="chev">▾</span></div>
+              <div class="accordion-body">
+                <div class="btn-row"><div class="btn btn-solid">Fetch Model</div></div>
+                <div class="tree-wf">
+                  <div class="node l1">▾ IED_1</div>
+                  <div class="node l2">▾ LD0 / LLN0</div>
+                  <div class="node l3">Mod · Beh · Health · NamPlt</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion">
+              <div class="accordion-head"><span>cp2</span><span class="chev">▸</span></div>
+            </div>
+          </div>
+
+          <div class="section-card" id="plugins-panel-so">
+            <h3>🔌 Plugins (1) <span style="float:right;" class="btn btn-outline">Add plugin</span></h3>
+            <div class="table-wf">
+              <div class="thead"><span class="cell">Plugin</span><span class="cell">State</span><span class="cell">URL</span><span class="cell narrow" style="flex-basis:110px;">Actions</span></div>
+              <div class="trow"><span class="cell">io 1.0</span><span class="cell">Healthy</span><span class="cell">http://dr-panel:9000/plugin</span><span class="cell narrow" style="flex-basis:130px;">▾ ✎ ↗ ⧉ ⟳ 🗑</span></div>
+            </div>
+            <p class="placeholder-text" style="margin:10px 0 0;">ⓘ Same panel as on ACSI Server, Details, Edit, Copy and Retry included, without the Controls column or the Controls line in Details - SO plugins don't answer Operate.</p>
+          </div>
+
+          <div class="wf-page-header" style="margin-top:8px;"><div class="wf-h1" data-label="Monitoring" style="width:150px;"></div></div>
+          <div class="btn-row">
+            <div class="btn btn-solid">Start Monitor</div>
+            <div class="btn btn-outline">Stop Monitor</div>
+            <div class="btn btn-outline">Clear Logs</div>
+            <div class="field"><span class="label">Log level ▾</span><div class="input"></div><span class="hint">As started (info, from LOG_LEVEL) / critical / … / trace. In use: info, as started (from LOG_LEVEL)</span></div>
+          </div>
+          <div class="section-card"><span class="placeholder-text">Activity Log - [All kinds ▾] [All levels ▾] ⇅ · each row: #id - time · [⚙ System | ▣ ACSI] [level] · message</span></div>
+          <p class="placeholder-text" style="margin-top:6px;">ⓘ Kind (System / ACSI service) is an icon + label, filtered separately from severity - color stays for severity only. Start/Stop is remembered per instance - leaving monitoring on and switching pages resumes it when you come back. Only Stop Monitor switches it off.</p>
+          <p class="placeholder-text" style="margin-top:6px;">ⓘ Spec 0011. Log level: what the selected instance writes to its container log (docker logs), not a filter of the Activity Log, which shows every entry. GET /api/log-level through /api/execute when the page opens and when another instance is selected; PUT as soon as a level is chosen. The change shows as a System entry, "Log level set to DEBUG (was INFO) from the HMI". This instance only, until it restarts. Disabled while no instance is selected; a refusal goes to the page's message bar.</p>
+
+          <div class="section-card"><span class="placeholder-text">Context menu (right-click a tree node): Read Value · Write Value · Operate · Configure BRCB/URCB …</span></div>
+
+          <div class="modal-overlay">
+            <div class="modal-title"><span class="t">🛡 TLS Configuration - SO</span><span class="x">×</span></div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:12px;"><span style="width:12px;height:12px;border:1.5px solid var(--wf-line);display:inline-block;"></span>Enable TLS (WSS)</label>
+            <div class="field-row">
+              <div class="field" style="min-width:200px;"><span class="label">TLS Version</span><div class="input"></div><span class="hint">TLS 1.2 / TLS 1.3</span></div>
+            </div>
+            <div class="field-row">
+              <div class="field" style="flex:1;"><span class="label">Server Private Key (PEM) - file, certificate directory or paste</span><div class="input select" data-label="From the certificate directory…"></div><div class="input" style="height:48px;"></div></div>
+              <div class="field" style="flex:1;"><span class="label">Server Certificate (PEM) - file, certificate directory or paste</span><div class="input select" data-label="From the certificate directory…"></div><div class="input" style="height:48px;"></div></div>
+            </div>
+            <div class="section-card" style="padding:8px 12px;margin-bottom:12px;"><span style="font-size:11px;"><strong>Mode:</strong> Server (Passive) - presents its certificate to connecting FSPs</span></div>
+            <p class="placeholder-text" style="margin:0;">Opened by 🛡 TLS Config. Saved to the BFF and applied to the SO right away; the BFF re-applies it after an SO restart. The checkbox reflects the running SO; version/certificates come from the saved settings while TLS is off. Button shows "(On)" while TLS is active. "From the certificate directory…" lists the BFF's <code>/certs</code> (GET /api/certs); picking a file stores <code>file:&lt;name&gt;</code>, which the instance reads from its own <code>/certs</code> - the PEM never passes through the browser.</p>
+            <div class="modal-footer"><div class="btn btn-outline">Cancel</div><div class="btn btn-solid">Save</div></div>
+          </div>
+
+          <div class="modal-overlay">
+            <div class="modal-title"><span class="t">🔑 OAuth Configuration - SO</span><span class="x">×</span></div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:12px;"><span style="width:12px;height:12px;border:1.5px solid var(--wf-line);display:inline-block;"></span>Enable OAuth 2.0</label>
+            <div class="field-row">
+              <div class="field" style="min-width:200px;"><span class="label">IDP Server</span><div class="input"></div><span class="hint">IDP-Server instance registered in Connections</span></div>
+              <div class="field" style="min-width:200px;"><span class="label">Realm</span><div class="input"></div></div>
+              <div class="field" style="justify-content:flex-end;"><div class="btn btn-outline">Discover endpoints</div></div>
+            </div>
+            <div class="field-row">
+              <div class="field" style="flex:1;"><span class="label">Certificate Endpoint (JWKS)</span><div class="input"></div><span class="hint">Filled by Discover endpoints</span></div>
+              <div class="field" style="flex:1;"><span class="label">Token Issuer</span><div class="input"></div><span class="hint">Must match the tokens' "iss" exactly</span></div>
+            </div>
+            <div class="field-row">
+              <div class="field" style="flex:1;"><span class="label">Auth Server CA (PEM) - file, certificate directory or paste</span><div class="input select" data-label="From the certificate directory…"></div><div class="input" style="height:48px;"></div><span class="hint">Only needed for an IDP on HTTPS with a private CA</span></div>
+            </div>
+            <p class="placeholder-text" style="margin:0;">Opened by 🔑 OAuth Config. Server (Passive) fields. Save stores the settings and applies them to the SO right away. Button shows "(On)" while OAuth is active. The Auth Server CA can be picked from the certificate directory, as in TLS Config (<code>file:&lt;name&gt;</code>).</p>
+            <div class="modal-footer"><div class="btn btn-outline">Cancel</div><div class="btn btn-solid">Save</div></div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="legend">
+    <span><span class="swatch"></span> editable field / empty content region</span>
+    <span><span class="swatch solid"></span> primary action</span>
+    <span>Dashed border = placeholder for real content; not a literal UI element</span>
+  </div>
+
+</div>
+
+<script>
+  const screens = Array.from(document.querySelectorAll('.screen'));
+  const picker = document.getElementById('picker');
+  const labels = {
+    'overview': 'Overview',
+    'connections': 'Connections',
+    'model': 'Model',
+    'traffic': 'Traffic',
+    'diagnostics': 'Diagnostics',
+    'tools': 'Tools',
+    'settings': 'Settings',
+    'acsi-server': 'ACSI Server (FSP)',
+    'acsi-client': 'ACSI Client (SO)',
+  };
+
+  screens.forEach((s) => {
+    const key = s.dataset.screen;
+    const btn = document.createElement('button');
+    btn.textContent = labels[key] || key;
+    btn.dataset.key = key;
+    btn.addEventListener('click', () => show(key));
+    picker.appendChild(btn);
+  });
+
+  // Build sidebar nav wireframe (shared markup) into every .wf-sidebar
+  const navItems = ['Overview', 'Connections', 'Model', 'Traffic', 'Diagnostics', 'Tools', 'Settings'];
+  document.querySelectorAll('.wf-sidebar').forEach((sidebar) => {
+    const active = sidebar.dataset.activeNav;
+    const logo = document.createElement('div');
+    logo.className = 'wf-logo';
+    logo.innerHTML = '<div class="box"></div><div class="box sub"></div>';
+    sidebar.appendChild(logo);
+    navItems.forEach((label) => {
+      const item = document.createElement('div');
+      item.className = 'wf-nav-item' + (label === active ? ' active' : '');
+      item.innerHTML = '<span class="dot"></span><span>' + label + '</span>';
+      sidebar.appendChild(item);
+    });
+  });
+
+  function show(key) {
+    screens.forEach((s) => s.classList.toggle('active', s.dataset.screen === key));
+    Array.from(picker.children).forEach((b) => b.classList.toggle('active', b.dataset.key === key));
+    try { localStorage.setItem('rti-wireframe-screen', key); } catch (e) {}
+  }
+
+  let initial = 'overview';
+  try { initial = localStorage.getItem('rti-wireframe-screen') || 'overview'; } catch (e) {}
+  if (!labels[initial]) initial = 'overview';
+  show(initial);
+</script>
+</body>
+</html>

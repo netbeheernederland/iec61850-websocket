@@ -1,0 +1,1359 @@
+/*
+ * SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Copyright 2025-2026 Netbeheer Nederland
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// src/pages/ACSIClient.jsx
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
+import Tree from '../components/Tree';
+import ContextMenu from '../components/ContextMenu';
+import ControlModal from '../components/ControlModal';
+import WriteValueModal from '../components/WriteValueModal';
+import BrcbConfigModal from '../components/BrcbConfigModal';
+import TLSConfigModal, { useRuntimeTlsEnabled } from '../components/TLSConfigModal';
+import OAuthConfigModal, { useRuntimeOAuthEnabled } from '../components/OAuthConfigModal';
+import SecurityActionMessage from '../components/SecurityActionMessage';
+import ActionLogPanel from '../components/ActionLogPanel.jsx';
+import LogLevelSelect from '../components/LogLevelSelect';
+import { getInstanceLogLevel, setInstanceLogLevel } from '../services/apiService';
+import PluginsPanel from '../components/PluginsPanel';
+import { executeApiCall, buildTargetValue, getApiById } from '../services/apiService';
+import { subscribe as subscribeLive } from '../services/liveSocket';
+import { usePersistentFlag } from '../hooks/usePersistentFlag';
+import { DEFAULT_BFF_HOST, DEFAULT_BFF_PORT } from '../config';
+import { log } from '../utils/log';
+
+const CONTROLLABLE_CDCS = ['SPC', 'DPC', 'APC', 'INC', 'ENC', 'BSC', 'ING', 'ASG', 'CTE', 'ENG'];
+
+const ACSIClient = ({ updateModel, bffBaseUrl = `http://${DEFAULT_BFF_HOST}:${DEFAULT_BFF_PORT}`, connections: propConnections = [] }) => {
+  const location = useLocation();
+  const endpoint = location.state?.endpoint;
+  // Two distinct ports for an RTI-SO instance:
+  // - apiTarget (endpoint.host:endpoint.port) is its BFF server - every
+  //   /api/execute call in this file goes there.
+  // - wsHost/wsPort is its own WebSocket (Passive) endpoint - the address
+  //   an RTI-FSP dials into. Seeded from the connection's stored ws_port
+  //   (falling back to the historical 8765 default only if that isn't set
+  //   yet), then kept in sync with the live status response below once
+  //   connected.
+  const apiTarget = endpoint ? `${endpoint.host}:${endpoint.port}` : null;
+
+  // The SO's log level while it runs (spec 0011), in Monitoring.
+  const loadLogLevel = useCallback(() => getInstanceLogLevel(apiTarget), [apiTarget]);
+  const saveLogLevel = useCallback((level) => setInstanceLogLevel(apiTarget, level), [apiTarget]);
+  const logLevelOwner = endpoint?.name || endpoint?.host || 'this SO';
+  const [wsHost, setWsHost] = useState(endpoint?.host || '127.0.0.1');
+  const [wsPort, setWsPort] = useState(endpoint?.ws_port || 8765);
+  const [wsCp, setWsCp] = useState(endpoint?.cp || 'cp1');
+  const [connected, setConnected] = useState(() => localStorage.getItem('acsi-connected') === 'true');
+  const [clientTrees, setClientTrees] = useState({}); // cp -> tree object, keyed so each client keeps its own model
+  const [clientLoading, setClientLoading] = useState({}); // cp -> boolean, tracks in-flight "Fetch Model" per client
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [statusInfo, setStatusInfo] = useState(null);
+  const [protocolMessages, setProtocolMessages] = useState([]);
+  const [isMonitoring, setIsMonitoring] = useState(false);
+  const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0 });
+  const [contextMenuTarget, setContextMenuTarget] = useState(null);
+  const [showControlModal, setShowControlModal] = useState(false);
+  const [showWriteModal, setShowWriteModal] = useState(false);
+  const [connections, setConnections] = useState([]);
+  const [acsiClientList, setAcsiClientList] = useState([]);
+  const [expandedClients, setExpandedClients] = useState({});
+  const statusIntervalRef = useRef(null);
+  const doDefinitionCacheRef = useRef({});
+  // Reflected on the TLS Config button - the SO's live runtime state, the
+  // same thing the modal loads, not the persisted connections.json copy.
+  const [tlsEnabled, refreshTlsEnabled] = useRuntimeTlsEnabled(apiTarget);
+  // Same for OAuth - reflected on the OAuth Config button.
+  const [oauthEnabled, refreshOAuthEnabled] = useRuntimeOAuthEnabled(apiTarget);
+
+  // Fetch connections from BFF to get IDP-Server instances.
+  // A useCallback at component scope, not a plain function local to the
+  // effect below - it also needs to be reachable from the TLSConfigModal
+  // onSuccess handler further down (to refresh after a save), which a
+  // useEffect-local function isn't. Matches the identical pattern already
+  // used in ACSIServer.jsx.
+  const fetchConnections = useCallback(async () => {
+    try {
+      const url = `${bffBaseUrl}/api/connections`;
+      const response = await fetch(url);
+      if (response.ok) {
+        const data = await response.json();
+        setConnections(data.connections || []);
+      }
+    } catch (error) {
+      log.error('Failed to fetch connections:', error);
+    }
+  }, [bffBaseUrl]);
+
+  useEffect(() => {
+    if (bffBaseUrl) {
+      fetchConnections();
+    }
+  }, [bffBaseUrl, fetchConnections]);
+
+  // Fetch properties (includes acsi_client_list) once on mount for first
+  // paint, then rely on the BFF's live push for updates instead of polling
+  // - acsi_client_list is filtered to only *connected* cps (see
+  // so/acsi_client.py's get_cp_list), so it changes exactly when a cp
+  // associates/disassociates, which is what the BFF's push_relay_loop
+  // (bff/bff_server.py) already watches for and broadcasts as "properties",
+  // same pattern as App.jsx's "connections" subscription.
+  useEffect(() => {
+    const fetchProperties = async () => {
+      if (!apiTarget) return;
+      try {
+        const result = await executeApiCall('properties', apiTarget, {});
+        if (result?.ok) {
+          const clientList = result.payload?.result?.acsi_client_list || result.payload?.acsi_client_list || [];
+          setAcsiClientList(Array.isArray(clientList) ? clientList : []);
+        }
+      } catch (error) {
+        log.error('Failed to fetch properties:', error);
+      }
+    };
+    fetchProperties();
+  }, [apiTarget]);
+
+  useEffect(() => {
+    if (!apiTarget) return undefined;
+    return subscribeLive('properties', (msg) => {
+      if (msg.target !== apiTarget) return;
+      const clientList = msg.data?.acsi_client_list;
+      if (Array.isArray(clientList)) setAcsiClientList(clientList);
+    });
+  }, [apiTarget]);
+
+  const [showBrcbConfigModal, setShowBrcbConfigModal] = useState(false);
+  const [showTLSModal, setShowTLSModal] = useState(false);
+  const [showOAuthModal, setShowOAuthModal] = useState(false);
+  const [message, setMessage] = useState(null);
+  const clearMessage = useCallback(() => setMessage(null), []);
+  // This SO's live connections.json record (its saved OAuth block) - the
+  // navigation-time `endpoint` copy goes stale once settings are saved.
+  const liveConnection = useMemo(
+    () => connections.find(c => c.host === endpoint?.host && String(c.port) === String(endpoint?.port)) || endpoint,
+    [connections, endpoint]
+  );
+  // This SO's plugins, as the BFF pushes them with the connections (App.jsx's
+  // live list - this page's own fetched copy doesn't carry them).
+  const pushedPlugins = useMemo(
+    () => propConnections.find(c => c.host === endpoint?.host && String(c.port) === String(endpoint?.port))?.plugins,
+    [propConnections, endpoint]
+  );
+  const monitorIntervalRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem('acsi-connected', String(connected));
+  }, [connected]);
+
+  // Keep wsHost/wsPort in sync with the live status response — the user
+  // can't edit these; they always reflect what the SO server reports.
+  useEffect(() => {
+    const liveHost = statusInfo?.result?.host;
+    const livePort = statusInfo?.result?.port;
+    if (liveHost !== undefined && liveHost !== null) setWsHost(liveHost);
+    if (livePort !== undefined && livePort !== null) setWsPort(livePort);
+  }, [statusInfo]);
+
+  // apiTarget for WS connection display (can be edited by user)
+  const wsEndpointTarget = `${wsHost}:${wsPort}`;
+
+  // Color for the small connection-status dot next to "Websocket Connection",
+  // driven by the /api/status response's result.status field.
+  const connectionStatusColor = (() => {
+    const status = (statusInfo?.result?.status || '').toLowerCase();
+    if (status === 'connected') return '#4caf50';
+    if (status === 'connecting') return '#ff9800';
+    if (status === 'error') return '#f44336';
+    if (status === 'disconnected') return '#9e9e9e';
+    return '#9e9e9e'; // unknown/not yet loaded
+  })();
+
+  // Display label for the dot's tooltip — translates the raw backend status
+  // into the wording we want shown to the user.
+  const connectionStatusLabel = (() => {
+    const status = (statusInfo?.result?.status || '').toLowerCase();
+    const STATUS_LABELS = {
+      connected: 'started',
+      connecting: 'starting',
+      disconnecting: 'stopping',
+      disconnected: 'stopped',
+    };
+    return STATUS_LABELS[status] || status || 'unknown';
+  })();
+
+  const [writeModalTarget, setWriteModalTarget] = useState({ ref: '', fc: '', endpoint: null, cp: null });
+  const [controlModalTarget, setControlModalTarget] = useState({ ref: '', name: '', cdc: '', endpoint: null, cp: null });
+  const [brcbConfigTarget, setBrcbConfigTarget] = useState({ ref: '', rcbType: '', endpoint: null, cp: null });
+
+  // Stop monitoring
+  const stopMonitoring = useCallback(() => {
+    if (monitorIntervalRef.current) {
+      clearInterval(monitorIntervalRef.current);
+      monitorIntervalRef.current = null;
+    }
+    setIsMonitoring(false);
+  }, []);
+
+    const [expandedNodesByClient, setExpandedNodesByClient] = useState({}); // cp -> { [nodeRef]: bool }
+
+    const handleExpandToggle = useCallback((cp, nodeRef, isExpanded) => {
+      setExpandedNodesByClient((prev) => ({
+        ...prev,
+        [cp]: { ...(prev[cp] || {}), [nodeRef]: isExpanded },
+      }));
+    }, []);
+
+    const toggleClientExpanded = useCallback((cp) => {
+      setExpandedClients((prev) => ({ ...prev, [cp]: !prev[cp] }));
+    }, []);
+
+
+  // Load status
+  const loadStatus = useCallback(async () => {
+    if (!apiTarget) return;
+    // Along with the status: the BFF re-applies the stored TLS config after
+    // an SO restart, so the TLS button would otherwise go stale.
+    refreshTlsEnabled();
+    refreshOAuthEnabled();
+    try {
+      const result = await executeApiCall('status', apiTarget, null);
+      if (result?.ok) setStatusInfo(result.payload);
+    } catch (error) {
+      log.error('Failed to load status:', error);
+    }
+  }, [apiTarget, refreshTlsEnabled, refreshOAuthEnabled]);
+
+    // Auto-poll SO status when endpoint is available — same pattern as
+    // ACSIServer.jsx, so the connection status and host/port stay fresh
+    // without requiring a manual "Reload Status" click.
+    useEffect(() => {
+      if (!apiTarget) return;
+      loadStatus(); // immediate fetch on mount / target change
+      statusIntervalRef.current = setInterval(loadStatus, 10000);
+      return () => {
+        if (statusIntervalRef.current) {
+          clearInterval(statusIntervalRef.current);
+          statusIntervalRef.current = null;
+        }
+      };
+    }, [apiTarget, loadStatus]);
+
+  // Fetch action logs
+  const fetchActionLogs = useCallback(async () => {
+    if (!apiTarget) return;
+    try {
+      const result = await executeApiCall('actions-logs', apiTarget, {});
+      if (result?.ok) {
+        const actions = result.payload.result?.actions || result.payload.actions || [];
+        if (Array.isArray(actions) && actions.length > 0) {
+          setProtocolMessages((prev) => {
+            const existingIds = new Set(prev.map((msg) => msg.id));
+            // `actions` comes back oldest-first (the backend appends to a
+            // deque) - reverse before prepending so a poll that catches
+            // more than one new entry doesn't put them in front of `prev`
+            // in their original oldest-first sub-order, which broke the
+            // newest-first ordering ActionLogPanel's default view relies on.
+            const newMessages = actions
+              .filter((msg) => msg && msg.id && !existingIds.has(msg.id))
+              .map((msg) => ({ ...msg, timestamp: new Date().toLocaleTimeString() }))
+              .reverse();
+            return [...newMessages, ...prev].slice(0, 30);
+          });
+        }
+      }
+    } catch (error) {
+      log.error('Failed to fetch action logs:', error);
+    }
+  }, [apiTarget]);
+
+  // Start monitoring
+  const startMonitoring = useCallback(async () => {
+    if (isMonitoring) return;
+    if (!apiTarget) {
+      setError('No API endpoint configured');
+      return;
+    }
+    stopMonitoring();
+    setIsMonitoring(true);
+    await fetchActionLogs();
+    monitorIntervalRef.current = setInterval(fetchActionLogs, 5000);
+  }, [isMonitoring, apiTarget, fetchActionLogs, stopMonitoring]);
+
+  // Whether the user has monitoring switched on - persisted (same global
+  // scope as 'acsi-connected') so it survives switching pages. Only the
+  // Start/Stop buttons change it; the unmount cleanup's stopMonitoring()
+  // just stops this mount's polling, it doesn't switch monitoring off.
+  const [monitoringWanted, setMonitoringWanted] = usePersistentFlag('acsi-monitoring');
+
+  const handleStartMonitoring = useCallback(() => {
+    setMonitoringWanted(true);
+    startMonitoring();
+  }, [setMonitoringWanted, startMonitoring]);
+
+  const handleStopMonitoring = useCallback(() => {
+    setMonitoringWanted(false);
+    stopMonitoring();
+  }, [setMonitoringWanted, stopMonitoring]);
+
+  // Resume monitoring on (re)mount if it was left on.
+  useEffect(() => {
+    if (monitoringWanted && apiTarget && !isMonitoring) startMonitoring();
+  }, [monitoringWanted, apiTarget, isMonitoring, startMonitoring]);
+
+  // Clear messages
+  const clearMessages = useCallback(async () => {
+    if (!apiTarget) {
+      setError('No API endpoint configured');
+      return;
+    }
+    const result = await executeApiCall('clear-logs', apiTarget, {});
+    if (result?.ok) setProtocolMessages([]);
+    else setError(`Error clearing messages: ${result?.payload?.error || 'Unknown error'}`);
+  }, [apiTarget]);
+
+  // Load model tree
+  // cpParam lets callers (accordion "Fetch Model" buttons) target a specific
+  // cp; each cp's fetched tree is kept independently in clientTrees.
+  const loadClientTree = useCallback(async (cpParam) => {
+    if (!apiTarget) {
+      setError('No API endpoint configured');
+      return;
+    }
+    const cpToUse = cpParam || wsCp;
+    setClientLoading((prev) => ({ ...prev, [cpToUse]: true }));
+    setError(null);
+    try {
+      const result = await executeApiCall('model-tree', apiTarget, { cp: cpToUse });
+      if (result?.ok) {
+        const tree = transformTree(result.payload);
+        setClientTrees((prev) => ({
+          ...prev,
+          [cpToUse]: tree.length > 0 ? { name: 'Server', type: 'server', children: tree } : null,
+        }));
+        // Every fresh fetch for this cp starts fully collapsed, not
+        // whatever was expanded from a previous fetch (refs may
+        // coincidentally match between fetches of the "same" model) -
+        // other cps' expand state is untouched.
+        setExpandedNodesByClient((prev) => ({ ...prev, [cpToUse]: {} }));
+        if (updateModel) {
+          updateModel(apiTarget, result.payload);
+        }
+      } else {
+        setError(result?.payload?.error || result?.rawText || 'Failed to fetch model');
+      }
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setClientLoading((prev) => ({ ...prev, [cpToUse]: false }));
+    }
+  }, [apiTarget, wsCp]);
+
+  // Transform API response to tree structure
+  const transformTree = (data) => {
+  if (!data.result?.model?.server?.logicalDevices) return [];
+  const lds = data.result.model.server.logicalDevices;
+  const logicalDeviceMap = data.result.model.logicalDeviceMap || {};
+  const logicalNodeDetails = data.result.model.logicalNodeDetails || {};
+  return lds.map((ld) => {
+    const ldName = typeof ld === 'object' ? ld.name : ld;
+    const lns = logicalDeviceMap[ldName] || [];
+    const children = lns.map((ln) => {
+      const lnName = typeof ln === 'object' ? (ln.name || ln.ln_class) : ln;
+      const lnRef = `${ldName}/${lnName}`;
+      const details = logicalNodeDetails[lnRef] || {};
+      const dataSets = details.dataSets || [];
+      const reportControls = details.reportControlBlocks || [];
+      const dataObjects = details.dataObjects || ln.dataObjects || ln.do || [];
+
+      // Group DataSets
+      const dsChildren = dataSets.map((ds) => ({
+        name: typeof ds === 'object' ? ds.name : ds,
+        type: 'DataSet',
+        ref: `${lnRef}.${typeof ds === 'object' ? ds.name : ds}`,
+        children: [],
+      }));
+
+      // Group ReportControls
+      const rcChildren = reportControls.map((rcb) => ({
+        name: typeof rcb === 'object' ? rcb.name : rcb,
+        type: typeof rcb === 'object' ? rcb.type : 'ReportControl',
+        ref: `${lnRef}.${typeof rcb === 'object' ? rcb.name : rcb}`,
+        children: [],
+        rcbType: typeof rcb === 'object' ? rcb.type : 'ReportControl',
+      }));
+
+      // Process DataObjects
+      const doChildren = dataObjects.map((doObj) => {
+        const doName = typeof doObj === 'object' ? doObj.name : doObj;
+        const doRef = `${lnRef}.${doName}`;
+        const das = (doObj.data_attributes || doObj.dataAttributes || doObj.da || []).map((da) => {
+          const daName = typeof da === 'object' ? da.name : da;
+          const daRef = `${doRef}.${daName}`;
+          const subDas = (da.subDataAttributes || da.sub_attributes || da.sda || []).map((sda) => {
+            const sdaName = typeof sda === 'object' ? sda.name : sda;
+            const sdaRef = `${daRef}.${sdaName}`;
+            return {
+              name: sdaName,
+              type: 'SDA',
+              ref: sdaRef,
+              fc: da.fc || doObj.fc || '',
+              bType: sda.bType || '',
+              children: [],
+            };
+          });
+          return {
+            name: daName,
+            type: 'DA',
+            ref: daRef,
+            fc: da.fc || doObj.fc || '',
+            bType: da.bType || '',
+            children: subDas,
+          };
+        });
+
+        // Process SDOs
+        const sdoChildren = (doObj.subDataObjects || doObj.sub_data_objects || []).map((sdo) => {
+          const sdoName = typeof sdo === 'object' ? sdo.name : sdo;
+          const sdoRef = `${doRef}.${sdoName}`;
+          const sdoDas = (sdo.dataAttributes || sdo.data_attributes || []).map((sdoDa) => {
+            const sdoDaName = typeof sdoDa === 'object' ? sdoDa.name : sdoDa;
+            const sdoDaRef = `${sdoRef}.${sdoDaName}`;
+            return {
+              name: sdoDaName,
+              type: 'SDA',
+              ref: sdoDaRef,
+              fc: sdoDa.fc || doObj.fc || '',
+              bType: sdoDa.bType || '',
+              children: [],
+            };
+          });
+          return {
+            name: sdoName,
+            type: 'SDO',
+            ref: sdoRef,
+            cdc: sdo.cdc || '',
+            children: sdoDas,
+          };
+        });
+
+        return {
+          name: doName,
+          type: 'DO',
+          ref: doRef,
+          fc: doObj.fc || '',
+          cdc: doObj.cdc || '',
+          children: [...das, ...sdoChildren],
+        };
+      });
+
+      return {
+        name: lnName,
+        type: 'LogicalNode',
+        ref: lnRef,
+        children: [
+          ...(dsChildren.length > 0 ? [{ name: 'DataSets', type: 'Group', children: dsChildren }] : []),
+          ...(rcChildren.length > 0 ? [{ name: 'ReportControls', type: 'Group', children: rcChildren }] : []),
+          ...doChildren,
+        ],
+      };
+    });
+    return {
+      name: ldName,
+      type: 'LDevice',
+      ref: ldName,
+      children,
+    };
+  });
+};
+
+  // Format value for display - matching the JS version logic
+  const formatValueForDisplay = useCallback((valueData, isError = false) => {
+    if (isError) {
+      return { display: '✗ Error', color: '#c62828' };
+    }
+
+    function asn1TimeStampToISOString(ts) {
+      if (!ts || typeof ts.secondSinceEpoch !== 'number') return '';
+      const seconds = ts.secondSinceEpoch;
+      let ms = 0;
+      if (typeof ts.fractionOfSecond === 'number') {
+        ms = Math.floor(ts.fractionOfSecond / 1000);
+      }
+      const date = new Date((seconds * 1000) + ms);
+      return date.toISOString();
+    }
+
+    function extractActualValue(val) {
+      if (Array.isArray(val) && val.length > 0 && val[0] && val[0].data) {
+        const dataObj = val[0].data;
+        if (typeof dataObj === 'object' && !Array.isArray(dataObj)) {
+          const keys = Object.keys(dataObj);
+          if (keys.length === 1) {
+            return dataObj[keys[0]];
+          }
+        }
+        return dataObj;
+      }
+      return val;
+    }
+
+    if (Array.isArray(valueData) && valueData.length > 0) {
+      const firstItem = valueData[0];
+
+      if (firstItem && firstItem.data && Array.isArray(firstItem.data)) {
+        if (firstItem.data.length === 2 &&
+            typeof firstItem.data[0] === 'string' &&
+            firstItem.data[0] === 'structure') {
+          return { display: '—', color: '#4caf50' };
+        }
+
+        if (firstItem.data.length === 2 && typeof firstItem.data[0] === 'string') {
+          const value = firstItem.data[1];
+          let displayValue = value;
+          if (value && typeof value === 'object' && typeof value.secondSinceEpoch === 'number') {
+            displayValue = asn1TimeStampToISOString(value) || JSON.stringify(value);
+          } else if (typeof value === 'number') {
+            displayValue = value.toFixed(2);
+          } else if (typeof value === 'boolean') {
+            displayValue = value ? 'true' : 'false';
+          } else if (typeof value === 'object') {
+            displayValue = JSON.stringify(value);
+          }
+          return { display: displayValue, color: '#4caf50' };
+        }
+      }
+    }
+
+    const actualValue = extractActualValue(valueData);
+    return { display: JSON.stringify(actualValue), color: '#4caf50' };
+  }, []);
+
+  // Read data value
+  const readDataValue = useCallback(
+    async (objRef, fc, cpParam) => {
+      if (!apiTarget) {
+        setError('No endpoint configured');
+        return;
+      }
+      const cpToUse = cpParam || wsCp;
+      const applyToTree = (valueData, isError) => {
+        setClientTrees((prevTrees) => {
+          const tree = prevTrees[cpToUse];
+          if (!tree) return prevTrees;
+          const formatted = formatValueForDisplay(valueData, isError);
+          const updateTreeWithValue = (nodes) =>
+            nodes.map((node) =>
+              node.ref === objRef ? { ...node, value: formatted.display, valueColor: formatted.color } :
+              node.children ? { ...node, children: updateTreeWithValue(node.children) } : node
+            );
+          return { ...prevTrees, [cpToUse]: { ...tree, children: updateTreeWithValue(tree.children) } };
+        });
+      };
+      try {
+        const result = await executeApiCall('read', apiTarget, { objRef, fc, cp: cpToUse });
+        if (result?.ok) {
+          const valueData = result.payload?.result?.value;
+          if (valueData) applyToTree(valueData, false);
+        } else {
+          applyToTree(result?.payload?.error || 'Unknown error', true);
+        }
+      } catch (error) {
+        applyToTree(error.message, true);
+      }
+    },
+    [apiTarget, wsCp, formatValueForDisplay]
+  );
+
+  // Write data value
+  const writeDataValue = useCallback(
+    async (objRef, fc, value, value_type, cpParam) => {
+      if (!apiTarget) {
+        setError('No endpoint configured');
+        throw new Error('No endpoint configured');
+      }
+      const cpToUse = cpParam || wsCp;
+      const applyToTree = (valueData, isError) => {
+        setClientTrees((prevTrees) => {
+          const tree = prevTrees[cpToUse];
+          if (!tree) return prevTrees;
+          const formatted = formatValueForDisplay(valueData, isError);
+          const updateTreeWithValue = (nodes) =>
+            nodes.map((node) =>
+              node.ref === objRef ? { ...node, value: formatted.display, valueColor: formatted.color } :
+              node.children ? { ...node, children: updateTreeWithValue(node.children) } : node
+            );
+          return { ...prevTrees, [cpToUse]: { ...tree, children: updateTreeWithValue(tree.children) } };
+        });
+      };
+      try {
+        const result = await executeApiCall('write', apiTarget, { objRef, fc, value, value_type, cp: cpToUse });
+        if (result?.ok) {
+          const valueData = result.payload?.result?.value || value;
+          if (valueData) applyToTree(valueData, false);
+          return result;
+        } else {
+          const errorMsg = result?.payload?.error || result?.rawText || 'Write failed';
+          setError(`Write failed: ${errorMsg}`);
+          throw new Error(errorMsg);
+        }
+      } catch (error) {
+        applyToTree(error.message, true);
+        setError(error.message);
+        throw error;
+      }
+    },
+    [apiTarget, wsCp, formatValueForDisplay]
+  );
+
+  // Cache of DO definitions used ONLY to decide context-menu availability.
+  // Deliberately separate from clientTrees so checking it never expands a row.
+  // Cache key includes cp since the same ref string can exist under different clients.
+  const fetchDoDefinition = useCallback(
+    async (ref, cpParam) => {
+      const cpToUse = cpParam || wsCp;
+      const cacheKey = `${cpToUse}::${ref}`;
+      if (doDefinitionCacheRef.current[cacheKey]) {
+        return doDefinitionCacheRef.current[cacheKey];
+      }
+      try {
+        const ldName = ref.split('/')[0];
+        const lnName = ref.split('/')[1].split('.')[0];
+        const doPath = ref.split('/')[1].split('.').slice(1).join('.');
+        const result = await executeApiCall('data-definition', apiTarget, {
+          ld_inst: ldName,
+          ln_inst: lnName,
+          do_path: doPath,
+          cp: cpToUse,
+        });
+        if (result?.ok) {
+          const def = {
+            dataAttributes: result.payload.result.value?.dataAttributeDefinition || [],
+            subDataObjects: result.payload.result.value?.subDataDefinition || [],
+          };
+          doDefinitionCacheRef.current[cacheKey] = def;
+          return def;
+        }
+      } catch (error) {
+        log.error('Failed to fetch DO definition:', error);
+      }
+      return null;
+    },
+    [apiTarget, wsCp]
+  );
+
+  const hasOperInDef = (def) =>
+    !!def?.dataAttributes?.some((da) => (da.name || da.daRef?.split('.').pop() || '').toLowerCase() === 'oper');
+
+  // Handle context menu
+  const handleContextMenu = useCallback(
+    (e, nodeInfo) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const { clientX, clientY } = e;
+
+      const cpToUse = nodeInfo.cp || wsCp;
+      const cacheKey = `${cpToUse}::${nodeInfo.ref}`;
+      const cachedDef = doDefinitionCacheRef.current[cacheKey];
+      const isDO = nodeInfo.nodeType === 'DO';
+
+      // Open right away with whatever we already know.
+      setContextMenuTarget({
+        ...nodeInfo,
+        cp: cpToUse,
+        hasOperDA: cachedDef ? hasOperInDef(cachedDef) : null, // null = not yet known
+        operPending: isDO && !cachedDef,
+      });
+      setContextMenu({ visible: true, x: clientX, y: clientY });
+
+      // If unknown, resolve in the background — no setClientTrees, no expand side-effect.
+      if (isDO && !cachedDef) {
+        fetchDoDefinition(nodeInfo.ref, cpToUse).then((def) => {
+          setContextMenuTarget((prev) =>
+            prev && prev.ref === nodeInfo.ref
+              ? { ...prev, hasOperDA: hasOperInDef(def), operPending: false }
+              : prev // menu target changed/closed since — ignore stale result
+          );
+        });
+      }
+    },
+    [fetchDoDefinition, wsCp]
+  );
+
+  // Close context menu
+  const closeContextMenu = useCallback(() => {
+    setContextMenu({ visible: false, x: 0, y: 0 });
+    setContextMenuTarget(null);
+  }, []);
+
+  // Handle node click (for expanding DOs/SDOs)
+  // nodeInfo.cp identifies which client's tree/accordion this click came
+  // from — each accordion's <Tree> forces this explicitly on every callback.
+const handleNodeClick = useCallback(
+  async (nodeInfo) => {
+    const nodeRef = nodeInfo.ref;
+    const cpToUse = nodeInfo.cp || wsCp;
+
+     const shouldToggle = !['DO', 'SDO', 'DataSet'].includes(nodeInfo.nodeType);
+
+    setExpandedNodesByClient((prev) => ({
+      ...prev,
+      [cpToUse]: {
+        ...(prev[cpToUse] || {}),
+        [nodeRef]: shouldToggle ? !(prev[cpToUse] || {})[nodeRef] : true,
+      },
+    }));
+
+    if (nodeInfo.nodeType === 'DO' || nodeInfo.nodeType === 'SDO') {
+      const nodeInTree = findNodeInTree(clientTrees[cpToUse], nodeInfo.ref);
+      if (nodeInTree?.children?.length > 0) return; // already expanded once
+
+      const def = await fetchDoDefinition(nodeInfo.ref, cpToUse);
+      if (def) {
+        updateTreeWithChildren(cpToUse, nodeInfo.ref, def.dataAttributes, def.subDataObjects);
+      }
+    } else if (nodeInfo.nodeType === 'DataSet') {
+      // Fetch DataSet directory
+       // Check if already loaded
+      const nodeInTree = findNodeInTree(clientTrees[cpToUse], nodeInfo.ref);
+      if (nodeInTree?.children?.length > 0) {
+        return; // Skip re-fetching
+      }
+
+      const ldName = nodeInfo.ref.split('/')[0];
+      const lnInst = nodeInfo.ref.split('/')[1].split('.')[0];
+      const dsName = nodeInfo.ref.split('/')[1].split('.')[1];
+      try {
+        const result = await executeApiCall('dataset-directory', apiTarget, {
+          ld_inst: ldName,
+          ln_inst: lnInst,
+          ds_inst: dsName,
+          cp: cpToUse,
+        });
+        if (result?.ok) {
+          const dataAttributes = result.payload.result.value || [];
+          updateTreeWithDataSetChildren(cpToUse, nodeInfo.ref, dataAttributes);
+        }
+      } catch (error) {
+        log.error('Failed to fetch DataSet directory:', error);
+      }
+    } else if (nodeInfo.nodeType === 'ReportControl') {
+      // Open ReportControl modal (if implemented)
+      log.debug('ReportControl clicked:', nodeInfo.ref);
+    }
+  },
+  [apiTarget, wsCp, clientTrees, fetchDoDefinition]
+);
+  const findNodeInTree = (tree, ref) => {
+    if (!tree) return null;
+    if (tree.ref === ref) return tree;
+    if (tree.children) {
+      for (const child of tree.children) {
+        const found = findNodeInTree(child, ref);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  // Helper to update tree with children for DOs/SDOs
+  // Writes directly into clientTrees[cp] via functional setState, so it never
+  // relies on a possibly-stale closure over the current tree.
+  const updateTreeWithChildren = useCallback((cp, ref, dataAttributes, subDataObjects) => {
+
+    const buildSdaChildren = (sdaList, parentRef, parentFc) => {
+      return sdaList.map((sda) => {
+        const sdaName = sda['cmpName'];
+        const sdaRef = `${parentRef}.${sdaName}`;
+        const sdaBType = Array.isArray(sda.cmpType) ? sda.cmpType[0] : (sda.bType || '');
+        const nestedChildren =
+          Array.isArray(sda.cmpType) && sda.cmpType[0] === 'structure' && Array.isArray(sda.cmpType[1])
+            ? buildSdaChildren(sda.cmpType[1], sdaRef, parentFc)
+            : [];
+        return { name: sdaName, type: 'SDA', ref: sdaRef, fc: parentFc, bType: sdaBType, children: nestedChildren };
+      });
+    };
+
+    setClientTrees((prevTrees) => {
+      const tree = prevTrees[cp];
+      if (!tree) return prevTrees;
+
+      const updateNode = (nodes) => {
+        let changed = false;
+        const result = nodes.map((node) => {
+          if (node.ref === ref) {
+            const existingChildren = node.children || [];
+            const existingRefs = new Set(existingChildren.map((child) => child.ref));
+
+            const daChildren = dataAttributes
+              .filter((da) => {
+                const daName = da.name || da.daRef?.split('.').pop() || 'DA';
+                return !existingRefs.has(`${ref}.${daName}`);
+              })
+              .map((da) => {
+                const daName = da.name || da.daRef?.split('.').pop() || 'DA';
+                const daRef = `${ref}.${daName}`;
+                const fc = da.fc || '';
+                const bType = Array.isArray(da.daType) ? da.daType[0] : (da.bType || '');
+                const rawSubDas =
+                  Array.isArray(da.daType) && da.daType[0] === 'structure' && Array.isArray(da.daType[1])
+                    ? da.daType[1]
+                    : (da.subDataAttributes || da.sub_attributes || da.sda || []);
+                return { name: daName, type: 'DA', ref: daRef, fc, bType, children: buildSdaChildren(rawSubDas, daRef, fc) };
+              });
+
+            const sdoChildren = subDataObjects
+              .filter((sdo) => !existingRefs.has(`${ref}.${sdo.name || 'SDO'}`))
+              .map((sdo) => {
+                const sdoName = sdo.name || 'SDO';
+                const sdoRef = `${ref}.${sdoName}`;
+                const sdoDas = (sdo.dataAttributes || sdo.data_attributes || []).map((sdoDa) => {
+                  const sdoDaName = sdoDa.name || sdoDa.daRef?.split('.').pop() || 'SDA';
+                  return { name: sdoDaName, type: 'SDA', ref: `${sdoRef}.${sdoDaName}`, fc: sdoDa.fc || '', bType: sdoDa.bType || '', children: [] };
+                });
+                return { name: sdoName, type: 'SDO', ref: sdoRef, cdc: sdo.cdc || '', children: sdoDas };
+              });
+
+            changed = true;
+            // Return same object reference if nothing new to add
+            if (daChildren.length === 0 && sdoChildren.length === 0) return node;
+            return { ...node, children: [...existingChildren, ...daChildren, ...sdoChildren] };
+          }
+
+          if (node.children && node.children.length > 0) {
+            const updatedChildren = updateNode(node.children);
+            // Only create new object if children actually changed
+            if (updatedChildren !== node.children) {
+              return { ...node, children: updatedChildren };
+            }
+          }
+          // Return same reference for unchanged nodes — React skips re-rendering these
+          return node;
+        });
+
+        // Return same array reference if nothing changed
+        return changed || result.some((n, i) => n !== nodes[i]) ? result : nodes;
+      };
+
+      const updatedChildren = updateNode(tree.children);
+      // Only trigger re-render if something actually changed
+      if (updatedChildren === tree.children) return prevTrees;
+      return { ...prevTrees, [cp]: { ...tree, children: updatedChildren } };
+    });
+  }, []);
+
+  // Helper to update tree with DataSet children
+  const updateTreeWithDataSetChildren = useCallback((cp, ref, dataAttributes) => {
+    setClientTrees((prevTrees) => {
+      const tree = prevTrees[cp];
+      if (!tree) return prevTrees;
+      const updateNode = (nodes) => {
+        return nodes.map((node) => {
+          if (node.ref === ref) {
+            const fcdas = dataAttributes.map((da) => ({
+              name: da.ref,
+              type: 'FCDA',
+              ref: da.ref,
+              fc: da.fc,
+              children: [],
+            }));
+            return {
+              ...node,
+              children: [...(node.children || []), ...fcdas],
+            };
+          }
+          return node.children ? { ...node, children: updateNode(node.children) } : node;
+        });
+      };
+      return { ...prevTrees, [cp]: { ...tree, children: updateNode(tree.children) } };
+    });
+  }, []);
+
+const getContextMenuItems = () => {
+  if (!contextMenuTarget) return [];
+  const { nodeType, ref, fc, cdc, rcbType } = contextMenuTarget;
+
+  const items = [];
+
+  if (nodeType === 'DO') {
+    if (cdc && CONTROLLABLE_CDCS.includes(cdc.toUpperCase())) {
+      if (contextMenuTarget.operPending) {
+        items.push({ label: 'Checking availability...', icon: 'fa-spinner', disabled: true, action: () => {} });
+      } else if (contextMenuTarget.hasOperDA) {
+          items.push({
+            label: 'Operate',
+            icon: 'fa-play',
+            action: () => {
+              // Capture the target info before closing the context menu
+              const {ref, name, cdc, endpoint: nodeEndpoint, cp: nodeCp} = contextMenuTarget;
+              setControlModalTarget({ref, name, cdc, endpoint: nodeEndpoint, cp: nodeCp});
+              setShowControlModal(true);
+              closeContextMenu();
+            },
+          });
+        }
+    }
+  }
+  else if (nodeType === 'DA' || nodeType === 'SDA' || nodeType === 'FCDA') {
+    const displayFc = fc || 'cf';
+    items.push({
+      label: `Read Value [${displayFc.toUpperCase()}]`,
+      icon: 'fa-eye',
+      action: () => {
+        readDataValue(ref, displayFc, contextMenuTarget.cp || wsCp);
+        closeContextMenu();
+      },
+    });
+    if (displayFc.toLowerCase() === 'sp' || displayFc.toLowerCase() === 'cf') {
+      items.push({
+        label: `Write Value [${displayFc.toUpperCase()}]`,
+        icon: 'fa-pen',
+        action: () => {
+        const { ref, fc, endpoint: nodeEndpoint, cp: nodeCp } = contextMenuTarget;  // Capture values first
+        setWriteModalTarget({ ref, fc, endpoint: nodeEndpoint, cp: nodeCp });         // Store in state
+        setShowWriteModal(true);
+        closeContextMenu();
+      },
+      });
+    }
+  }
+  else if (nodeType === 'SDO') {
+    items.push({
+      label: 'Expand',
+      icon: 'fa-folder-open',
+      action: () => {
+        handleNodeClick({ ref, nodeType: 'SDO', cp: contextMenuTarget.cp || wsCp });
+        closeContextMenu();
+      },
+    });
+  }
+  else if (nodeType === 'ReportControl' || nodeType === 'BRCB' || nodeType === 'URCB' || nodeType === 'ReportControlBlock' || rcbType) {
+    items.push({
+      label: 'Configure',
+      icon: 'fa-cog',
+      action: () => {
+        // Capture the target info before closing the context menu
+        const { ref, rcbType: nodeRcbType, endpoint: nodeEndpoint, cp: nodeCp } = contextMenuTarget;
+        setBrcbConfigTarget({ ref, rcbType: nodeRcbType || nodeType, endpoint: nodeEndpoint, cp: nodeCp });
+        setShowBrcbConfigModal(true);
+        closeContextMenu();
+      },
+    });
+  }
+
+  return items;
+};
+
+  // Cleanup
+  useEffect(() => {
+    return () => {
+      stopMonitoring();
+      if (statusIntervalRef.current) {
+        clearInterval(statusIntervalRef.current);
+        statusIntervalRef.current = null;
+      }
+    };
+  }, [stopMonitoring]);
+
+
+   return (
+    <section className="page">
+      {/* Header */}
+      <div className="page-header" style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <h1>
+            <i className="fas fa-microchip" style={{ marginRight: '10px', color: 'var(--primary-light)' }}></i>
+            Websocket Connection
+          </h1>
+          <span
+            title={statusInfo?.result?.status ? `WS Passive status: ${connectionStatusLabel}` : 'Status: unknown'}
+            style={{
+              display: 'inline-block',
+              width: '10px',
+              height: '10px',
+              borderRadius: '50%',
+              backgroundColor: connectionStatusColor,
+              flexShrink: 0,
+            }}
+          ></span>
+        </div>
+      </div>
+
+      {/* Connection Section - two distinct ports, shown explicitly so
+          they're never confused: the BFF server this page talks to via
+          /api/execute, and this instance's own WebSocket (Passive)
+          endpoint that an RTI-FSP dials into. */}
+      <div className="acsi-connection-section" style={{ display: 'flex', alignItems: 'flex-end', gap: '16px', marginBottom: '24px', flexWrap: 'wrap' }}>
+
+        <div className="form-group">
+          <label htmlFor="acsi-client-bff-host">BFF Host</label>
+          <input type="text" id="acsi-client-bff-host" value={endpoint?.host || ''} placeholder="—" readOnly />
+        </div>
+        <div className="form-group">
+          <label htmlFor="acsi-client-bff-port">BFF Port</label>
+          <input type="text" id="acsi-client-bff-port" value={endpoint?.port || ''} placeholder="—" readOnly />
+        </div>
+        <div className="form-group">
+          <label htmlFor="acsi-client-ws-host-page">WS Host</label>
+          <input type="text" id="acsi-client-ws-host-page" value={wsHost} placeholder="0.0.0.0" readOnly />
+        </div>
+        <div className="form-group">
+          <label htmlFor="acsi-client-ws-port">WS Port</label>
+          <input type="text" id="acsi-client-ws-port" value={wsPort} placeholder="102" readOnly />
+        </div>
+      </div>
+
+      {/* Security Configuration Buttons */}
+      <div style={{ display: 'flex', gap: '16px', marginLeft: 'auto', marginBottom: '24px' }}>
+        <button
+          className="btn-secondary"
+          onClick={() => setShowTLSModal(true)}
+          disabled={loading}
+          title={tlsEnabled ? 'TLS is enabled - click to configure' : 'Configure TLS settings'}
+          id="acsi-client-tls-btn"
+          style={tlsEnabled ? {
+            borderColor: 'var(--success-color)',
+            color: 'var(--success-color)',
+          } : undefined}
+        >
+          <i className={`fas ${tlsEnabled ? 'fa-lock' : 'fa-shield-alt'}`} style={{ marginRight: '8px' }}></i>
+          TLS Config{tlsEnabled ? ' (On)' : ''}
+        </button>
+        <button
+          className="btn-secondary"
+          onClick={() => setShowOAuthModal(true)}
+          disabled={loading}
+          title={oauthEnabled ? 'OAuth is enabled - click to configure' : 'Configure OAuth settings'}
+          id="acsi-client-oauth-btn"
+          style={oauthEnabled ? {
+            borderColor: 'var(--success-color)',
+            color: 'var(--success-color)',
+          } : undefined}
+        >
+          <i className="fas fa-key" style={{ marginRight: '8px' }}></i>
+          OAuth Config{oauthEnabled ? ' (On)' : ''}
+        </button>
+      </div>
+      <SecurityActionMessage id="acsi-client-security-message" message={message} onDismiss={clearMessage} />
+
+      <div className="page-header" style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <h1>
+            <i className="fas fa-microchip" style={{ marginRight: '10px', color: 'var(--primary-light)' }}></i>
+            ACSI Client
+          </h1>
+          <span id="acsi-endpoint-badge" className="acsi-endpoint-badge" style={{ display: connected ? 'inline-flex' : 'none' }}>
+            {connected && statusInfo && `${statusInfo.result?.host}:${statusInfo.result?.port}`}
+            {statusInfo?.result?.accessPoints && <span style={{ marginLeft: '8px' }}>AP: {statusInfo.result.accessPoints}</span>}
+            {endpoint && !connected && <span>{endpoint.name || `${endpoint.host}:${endpoint.port}`}</span>}
+          </span>
+        </div>
+      </div>
+
+      {/* ACSI Clients (from properties API's acsi_client_list) */}
+      {acsiClientList.length > 0 && (
+        <div className="acsi-clients-list" style={{ marginBottom: '24px' }}>
+          {acsiClientList.map((cp) => {
+            const isExpanded = !!expandedClients[cp];
+            const isFetchingThis = !!clientLoading[cp];
+            const cpTree = clientTrees[cp];
+            return (
+              <div
+                key={cp}
+                className="acsi-client-entry"
+                style={{
+                  border: '1px solid var(--border-color)',
+                  borderRadius: '8px',
+                  marginBottom: '8px',
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  onClick={() => toggleClientExpanded(cp)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    cursor: 'pointer',
+                    background: 'var(--bg-card)',
+                  }}
+                >
+                  <span style={{ fontWeight: 500 }}>{cp}</span>
+                  <i className={`fas fa-chevron-${isExpanded ? 'up' : 'down'}`}></i>
+                </div>
+                {isExpanded && (
+                  <div
+                    style={{
+                      padding: '16px',
+                      background: 'var(--bg-card)',
+                      borderTop: '1px solid var(--border-color)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', gap: '16px', marginBottom: '16px' }}>
+                      <button
+                        className="btn-primary"
+                        onClick={() => loadClientTree(cp)}
+                        disabled={isFetchingThis || !apiTarget}
+                      >
+                        {isFetchingThis ? 'Fetching...' : 'Fetch Model'}
+                      </button>
+                    </div>
+                    <div id={`acsi-client-tree-container-${cp}`} className="model-tree">
+                      {cpTree ? (
+                        <Tree
+                          data={cpTree}
+                          onNodeClick={(nodeInfo) => handleNodeClick({ ...nodeInfo, cp })}
+                          onContextMenu={(e, nodeInfo) => handleContextMenu(e, { ...nodeInfo, cp })}
+                          onExpandToggle={(nodeRef, isExpandedFlag) => handleExpandToggle(cp, nodeRef, isExpandedFlag)}
+                          expandedNodes={expandedNodesByClient[cp] || {}}
+                          endpoint={endpoint}
+                          cp={cp}
+                        />
+                      ) : (
+                        <p style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '12px' }}>
+                          Click "Fetch Model" to load the ACSI model tree for {cp}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+
+      {/* Error Display */}
+      {error && (
+        <div className="alert alert-error" style={{ marginBottom: '16px', padding: '12px', background: 'var(--danger-bg)', color: 'var(--danger-color)', borderRadius: '4px' }}>
+          <i className="fas fa-exclamation-triangle" style={{ marginRight: '8px' }}></i>
+          {error}
+        </div>
+      )}
+
+      {/* Status Info */}
+      {/*}
+      {statusInfo && (
+        <div style={{ marginBottom: '24px', padding: '16px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+          <h3 style={{ margin: 0, marginBottom: '12px', fontSize: '16px' }}>Connection Status</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+            <div>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Address</span>
+              <div style={{ fontWeight: '500' }}>{statusInfo.result?.host}:{statusInfo.result?.port}</div>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Status</span>
+              <div style={{ fontWeight: '500' }}>{JSON.stringify(statusInfo.result?.status)}</div>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Model</span>
+              <div style={{ fontWeight: '500' }}>{statusInfo.result?.status?.modelName || 'N/A'}</div>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Access Points</span>
+              <div style={{ fontWeight: '500' }}>{statusInfo.result?.accessPoints || 'N/A'}</div>
+            </div>
+          </div>
+        </div>
+      )}
+      */}
+
+      <PluginsPanel target={apiTarget} role="so" pushed={pushedPlugins} instances={propConnections} />
+
+      <div className="page-header" style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <h1>
+            <i className="fas fa-microchip" style={{ marginRight: '10px', color: 'var(--primary-light)' }}></i>
+            Monitoring
+          </h1>
+        </div>
+      </div>
+
+      <ActionLogPanel
+        messages={protocolMessages}
+        isMonitoring={isMonitoring}
+        disabled={!apiTarget}
+        onStart={handleStartMonitoring}
+        onStop={handleStopMonitoring}
+        onClear={clearMessages}
+        toolbar={
+          <LogLevelSelect
+            id="instance-log-level"
+            label="Log level"
+            load={loadLogLevel}
+            save={saveLogLevel}
+            disabled={!apiTarget}
+            disabledText="Select an SO to see its log level."
+            hint={`What ${logLevelOwner} writes to its container log (docker logs); the Activity Log below shows every entry, at any level.`}
+            reloadKey={apiTarget}
+            onError={(msg) => setMessage({ type: 'error', text: msg })}
+          />
+        }
+      />
+
+      {/* Context Menu */}
+      <ContextMenu
+        x={contextMenu.x}
+        y={contextMenu.y}
+        visible={contextMenu.visible}
+        onClose={closeContextMenu}
+        items={getContextMenuItems()}
+      />
+
+      {/* Control Modal */}
+      {showControlModal && (
+        <ControlModal
+          objRef={controlModalTarget.ref}
+          objName={controlModalTarget.name}
+          cdc={controlModalTarget.cdc}
+          endpoint={controlModalTarget.endpoint || endpoint}
+          cp={controlModalTarget.cp || wsCp}
+          onClose={() => {
+            setShowControlModal(false);
+            setControlModalTarget({ ref: '', name: '', cdc: '', endpoint: null, cp: null });
+          }}
+          onSuccess={() => {
+            setShowControlModal(false);
+            setControlModalTarget({ ref: '', name: '', cdc: '', endpoint: null, cp: null });
+          }}
+        />
+      )}
+
+      {/* Write Value Modal */}
+      {showWriteModal && (
+        <WriteValueModal
+          objRef={writeModalTarget.ref}
+          fc={writeModalTarget.fc}
+          endpoint={writeModalTarget.endpoint || contextMenuTarget?.endpoint || endpoint}
+          cp={writeModalTarget.cp || contextMenuTarget?.cp || wsCp}
+          onClose={() => {
+            setShowWriteModal(false);
+            setWriteModalTarget({ ref: '', fc: '', endpoint: null, cp: null });
+          }}
+          onSuccess={async () => {
+            setShowWriteModal(false);
+            setWriteModalTarget({ ref: '', fc: '', endpoint: null, cp: null });
+            // Refresh the value after write
+            if (writeModalTarget.ref && writeModalTarget.fc) {
+              await readDataValue(writeModalTarget.ref, writeModalTarget.fc, writeModalTarget.cp || wsCp);
+            }
+          }}
+        />
+      )}
+
+      {/* BRCB Configuration Modal */}
+      {showBrcbConfigModal && (
+        <BrcbConfigModal
+          objRef={brcbConfigTarget.ref}
+          rcbType={brcbConfigTarget.rcbType}
+          endpoint={brcbConfigTarget.endpoint || contextMenuTarget?.endpoint || endpoint}
+          cp={brcbConfigTarget.cp || contextMenuTarget?.cp || wsCp}
+          pinSo={propConnections.find((c) => c.type === 'RTI-SO' && c.host === endpoint?.host && String(c.port) === String(endpoint?.port))}
+          onClose={() => {
+            setShowBrcbConfigModal(false);
+            setBrcbConfigTarget({ ref: '', rcbType: '', endpoint: null, cp: null });
+          }}
+          onSuccess={() => {
+            setShowBrcbConfigModal(false);
+            setBrcbConfigTarget({ ref: '', rcbType: '', endpoint: null, cp: null });
+          }}
+        />
+      )}
+
+      <OAuthConfigModal
+        isOpen={showOAuthModal}
+        onClose={() => setShowOAuthModal(false)}
+        connection={liveConnection}
+        wsMode="passive"
+        connections={connections}
+        target={apiTarget}
+        bffBaseUrl={bffBaseUrl}
+        onSuccess={(msg) => {
+          setMessage({ type: 'success', text: msg });
+          fetchConnections();
+          refreshOAuthEnabled();
+        }}
+        onError={(msg) => setMessage({ type: 'error', text: msg })}
+      />
+
+      <TLSConfigModal
+        isOpen={showTLSModal}
+        onClose={() => {
+          setShowTLSModal(false);
+        }}
+        connection={(
+          () => {
+            // Try to find matching connection from live connections (has updated TLS)
+            const liveConn = connections.find(c =>
+              (c.host === endpoint?.host && String(c.port) === String(endpoint?.port)) ||
+              (c.host === wsHost && String(c.port) === String(wsPort))
+            );
+            if (liveConn) {
+              return liveConn;
+            }
+            // Fallback to endpoint with TLS if available
+            if (endpoint?.TLS) {
+              return {
+                name: endpoint.name || wsHost,
+                host: endpoint.host || wsHost,
+                port: endpoint.port || wsPort,
+                type: 'RTI-FSP',
+                ws_mode: 'passive',
+                TLS: endpoint.TLS,
+                properties_info: {
+                  properties: {
+                    ws_mode: 'passive'
+                  }
+                }
+              };
+            }
+            // Final fallback
+            return {
+              name: endpoint?.name || wsHost,
+              host: endpoint?.host || wsHost,
+              port: endpoint?.port || wsPort,
+              type: 'RTI-FSP',
+              ws_mode: 'passive',
+              TLS: {},
+              properties_info: {
+                properties: {
+                  ws_mode: 'passive'
+                }
+              }
+            };
+          }
+        )()}
+        bffBaseUrl={bffBaseUrl}
+        wsHost={wsHost}
+        wsPort={wsPort}
+        onSuccess={(msg) => {
+          setMessage({ type: 'success', text: msg });
+          // Refetch connections to get updated TLS config
+          fetchConnections();
+          refreshTlsEnabled();
+        }}
+        onError={(msg) => setMessage({ type: 'error', text: msg })}
+      />
+    </section>
+  );
+};
+
+export default ACSIClient;

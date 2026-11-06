@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,26 +15,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
+import sys
 
-from ws61850.endpoint.endpoint import WebSocketEndpoint
+from ws61850.endpoint.passive_endpoint import PassiveEndpoint
 from ws61850.iec61850.client.iec61850_client import IEC61850Client
 
-maxMessageSize_server = 65000
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 
 
 async def main():
-    protocol = ["iec61850-tpaa-jer-v1", "iec61850-tpaa-ber-v1"]
-    # websocket server
-    ep_wsServer = WebSocketEndpoint()
+    endpoint = PassiveEndpoint()
 
-    iec61850_client = IEC61850Client("cp1")
-    ep_wsServer.add_iec61850_client(iec61850_client)
+    client = IEC61850Client("cp1")
+    endpoint.add_iec61850_client(client)
 
-    server_task = asyncio.create_task(
-        ep_wsServer.start("passive", "localhost", 8765, protocol=protocol)
+    logger.info("Waiting for client connections on localhost:8765 (JER + BER)")
+    await endpoint.start(
+        "localhost", 8765, protocol=["iec61850-tpaa-jer-v1", "iec61850-tpaa-ber-v1"]
     )
-
-    await server_task
 
 
 if __name__ == "__main__":

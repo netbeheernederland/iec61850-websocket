@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# The demo's default plugins: one dr_leds (two simulated LEDs, no hardware)
+# per FSP and SO, which config/plugin-configuration/ points them at (decision
+# 0034). An overlay on docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.leds.yaml up -d
+#
+# or COMPOSE_FILE=docker-compose.yml:docker-compose.leds.yaml in .env. Without
+# it the FSPs and SO list dr_leds as failed and try again every 10 s.
+# The image is built from examples/rti-plugins/dr_leds, and published as
+# dr-leds next to the demo's images (RTI_IMAGE_REPO, RTI_IMAGE_TAG).
+x-dr-leds: &dr-leds
+  image: ${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/dr-leds:${RTI_IMAGE_TAG:-latest}
+  build:
+    context: ../rti-plugins/dr_leds
+    dockerfile: docker/Dockerfile
+  networks:
+    - rti-network
+  restart: unless-stopped
+  # Port 8099 and the health check are set by the Dockerfile; nothing is
+  # published: the HMI reaches the LEDs through /api/plugins/dr_leds/.
+
+services:
+  dr-leds-fsp01:
+    <<: *dr-leds
+    container_name: dr-leds-fsp01
+
+  dr-leds-fsp02:
+    <<: *dr-leds
+    container_name: dr-leds-fsp02
+
+  dr-leds-so:
+    <<: *dr-leds
+    container_name: dr-leds-so

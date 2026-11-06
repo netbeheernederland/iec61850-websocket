@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Opt-in: the IO server (dr-panel) as the FSPs' and SO's plugin, instead of
+# dr_leds (decision 0034). An overlay on docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.io.yaml up -d
+#
+# or COMPOSE_FILE=docker-compose.yml:docker-compose.io.yaml in .env. One IO
+# server for all three: on a Raspberry Pi it drives the Pi's pins, which one
+# process can hold. It runs anywhere, in mock mode without the Pi's devices;
+# on the Pi, add its device overlay as a third file:
+#
+#   -f ../rti-plugins/dr_panel/docker-compose.pi.yaml
+#
+# The image is the published dr-panel, built from examples/rti-plugins/dr_panel.
+# Don't also run dr_panel's own stack (decision 0028): both are named dr-panel.
+x-dr-panel: &dr-panel
+  image: ${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/dr-panel:${RTI_IMAGE_TAG:-latest}
+  build:
+    context: ../rti-plugins/dr_panel
+    dockerfile: docker/Dockerfile
+    args:
+      PI_USER: ${PI_USER:-pi}
+      PI_UID: ${PI_UID:-1000}
+      PI_GID: ${PI_GID:-1000}
+      GPIO_GID: ${GPIO_GID:-986}
+      I2C_GID: ${I2C_GID:-988}
+      SPI_GID: ${SPI_GID:-989}
+  networks:
+    - rti-network
+  restart: unless-stopped
+  # Port 9000 and the health check are set by the Dockerfile; nothing is
+  # published: the HMI reaches the devices through /api/plugins/dr_panel/.
+
+services:
+  dr-panel:
+    <<: *dr-panel
+    container_name: dr-panel
+
+  # The FSPs and SO connect to it, from config/plugin-configuration/io/
+  # mounted over the default configuration (dr_leds).
+  rti-fsp01:
+    volumes:
+      - ./config/plugin-configuration/io/rti-fsp01.json:/plugins/plugins.json:ro
+
+  rti-fsp02:
+    volumes:
+      - ./config/plugin-configuration/io/rti-fsp02.json:/plugins/plugins.json:ro
+
+  rti-so:
+    volumes:
+      - ./config/plugin-configuration/io/rti-so.json:/plugins/plugins.json:ro

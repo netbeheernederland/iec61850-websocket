@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,13 +15,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import pathlib
 from random import randint
 
-from ws61850.endpoint.endpoint import WebSocketEndpoint
-from ws61850.iec61850.data_model.example_ieds import build_model1, build_model2
+from ws61850.endpoint import PassiveEndpoint
+from ws61850.iec61850.data_model import IedModelLoader
 from ws61850.iec61850.server.iec61850_server import IEC61850Server
 
-maxMessageSize = 65000
+_MODEL1_PATH = pathlib.Path(__file__).parent.parent / "ied_model1.json"
+_MODEL2_PATH = pathlib.Path(__file__).parent.parent / "ied_model2.json"
+
+max_message_size = 65000
 
 
 async def toggle_custom_value(iec61150_server, obj_ref):
@@ -42,19 +46,21 @@ def send_msg_callback(msg, timestamp):
 
 async def main():
     # websocket client
-    ep_wsServer = WebSocketEndpoint(is_direct=True)
-    ep_wsServer.recv_msg_callback = received_msg_callback
-    ep_wsServer.send_msg_callback = send_msg_callback
-    iec61850_server = IEC61850Server(build_model1(), "cp1")
+    ep_ws_server = PassiveEndpoint(is_direct=True)
+    ep_ws_server.recv_msg_callback = received_msg_callback
+    ep_ws_server.send_msg_callback = send_msg_callback
+    iec61850_server = IEC61850Server(IedModelLoader.from_file(_MODEL1_PATH), "cp1")
     report_task_1 = asyncio.create_task(iec61850_server.periodic_report_start())
-    ep_wsServer.add_iec61850_server(iec61850_server)
+    ep_ws_server.add_iec61850_server(iec61850_server)
 
-    iec61850_server = IEC61850Server(build_model2(), "cp2")
-    toggle_task_2 = asyncio.create_task(toggle_custom_value(iec61850_server, "LD0/DGEN1.DEROpSt.stVal"))
+    iec61850_server = IEC61850Server(IedModelLoader.from_file(_MODEL2_PATH), "cp2")
+    toggle_task_2 = asyncio.create_task(
+        toggle_custom_value(iec61850_server, "LD0/DGEN1.DEROpSt.stVal")
+    )
 
-    ep_wsServer.add_iec61850_server(iec61850_server)
+    ep_ws_server.add_iec61850_server(iec61850_server)
 
-    server_task = asyncio.create_task(ep_wsServer.start("passive", "localhost", 8765))
+    server_task = asyncio.create_task(ep_ws_server.start("localhost", 8765))
 
     # await server_task
     await asyncio.gather(server_task, report_task_1, toggle_task_2)

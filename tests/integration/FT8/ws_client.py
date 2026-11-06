@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
+import pathlib
+import sys
 
-from testing.ieds.high_level_model import make_ied_model1
-from ws61850.endpoint.endpoint import WebSocketEndpoint
+from ws61850.endpoint.active_endpoint import ActiveEndpoint
+from ws61850.iec61850.data_model import IedModelLoader
 from ws61850.iec61850.server.control_handling import (
     ControlHandlerResult,
     ControlServiceStatusKind,
@@ -25,13 +28,25 @@ from ws61850.iec61850.server.control_handling import (
 from ws61850.iec61850.server.iec61850_server import IEC61850Server
 from ws61850.iec61850.server.service_error import ServiceStatusKind
 
-maxMessageSize = 65000
+_MODEL_PATH = (
+    pathlib.Path(__file__).parent.parent.parent.parent
+    / "testing"
+    / "ieds"
+    / "ied_model1.json"
+)
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 
 
-def control_handler_for_float(obj_ref, ctlVal_value, parameter):
-    if ctlVal_value is not None:
-        if ctlVal_value["type"].startswith("float"):
-            if ctlVal_value["value"] < 50:
+def control_handler_for_float(obj_ref, ctl_val_value, parameter):
+    if ctl_val_value is not None:
+        if ctl_val_value["type"].startswith("float"):
+            if ctl_val_value["value"] < 50:
                 return ControlHandlerResult.OK, None
             else:
                 return (
@@ -44,14 +59,14 @@ def control_handler_for_float(obj_ref, ctlVal_value, parameter):
 
 
 async def main():
-    ep_wsClient_1 = WebSocketEndpoint()
-    iec61850_server_1 = IEC61850Server(make_ied_model1(), "cp1")
-    iec61850_server_1.set_control_handler(control_handler_for_float, None)
-    ep_wsClient_1.add_iec61850_server(iec61850_server_1)
+    endpoint = ActiveEndpoint()
 
-    task1 = asyncio.create_task(ep_wsClient_1.start("active", "localhost", 8765, "cp1"))
+    iec61850_server = IEC61850Server(IedModelLoader.from_file(_MODEL_PATH), "cp1")
+    iec61850_server.set_control_handler(control_handler_for_float, None)
+    endpoint.add_iec61850_server(iec61850_server)
 
-    await asyncio.gather(task1)
+    logger.info("Connecting to localhost:8765 cp=cp1")
+    await endpoint.start("localhost", 8765, "cp1")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,8 +25,14 @@ class ServerControlObject:
 
 
 def get_control_das(data_object, list):
-    control_item = next((da for da in data_object.get_da_from_do_or_da_list() if da.fc == FunctionalConstraint.co),
-                        None)
+    control_item = next(
+        (
+            da
+            for da in data_object.get_da_from_do_or_da_list()
+            if da.fc == FunctionalConstraint.co
+        ),
+        None,
+    )
     if control_item is not None:
         list.append(ServerControlObject(data_object))
     if len(data_object.get_do_from_do_or_da_list()) > 0:

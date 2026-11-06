@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "dr-panel"
+version = "0.1.0"
+description = "RTI Demo IO server for the Raspberry Pi (GPIO/I2C device control API)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.139.0",
+    "pydantic>=2",
+    "uvicorn>=0.51.0",
+    "httpx2>=2.13.0",
+    "gpiod",
+    "gpiozero",
+    "smbus2",
+    "Adafruit-ADS1x15",
+]
+
+[project.scripts]
+dr-panel = "dr_panel.server.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dr_panel.server" = ["io_config.json"]
+"dr_panel.plugin" = ["io_mapping.json"]
+
+[tool.pytest.ini_options]
+# The tests run in the FSP's environment (decision 0023), which doesn't
+# install this project; pythonpath makes dr_panel importable there.
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: fast, isolated unit tests (no Docker/network required)",
+]

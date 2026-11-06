@@ -1,0 +1,320 @@
+<!--
+SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+    # SO: IEC 61850 ACSI Client Implementation
+
+This folder contains the **SO (System Operator)** implementation - an **IEC 61850 ACSI Client** that uses WebSocket in passive mode to connect to ACSI servers for substation automation monitoring and control.
+
+## Overview
+
+The SO directory implements a complete **IEC 61850 ACSI (Abstract Communication Service Interface) Client** that:
+
+- Connects to IEC 61850 servers via WebSocket (passive mode)
+- Provides REST API endpoints for client management (BFF - Backend for Frontend)
+- Retrieves and navigates server directory structures
+- Reads data values from connected servers
+- Writes data values to connected servers
+- Manages multiple connections and communication points
+- Integrates with IO devices via the IO service (`examples/rti-plugins/dr_panel`, its own stack)
+
+### Architecture
+
+![RTI-SO ACSI client architecture](../../../../docs/rti-demo/images/SO_ACSI_CLIENT.png)
+
+```
++------------------+     +---------------------+     +------------------+
+|                  |     |                     |     |                  |
+|   External       |<--->|   bff_endpoint.py   |<--->|   acsi_client.py  |
+|   Client/API     |     |   (REST API)        |     |   (WebSocket)     |
+|   (Port 5000)    |     |   FastAPI           |     |   IEC 61850 Client|
+|                  |     |                     |     |   (Passive Mode)  |
++------------------+     +----------+----------+     +----------+----------+
+                                    |                        |
+                                    v                        v
+                            +--------------------+    +-------------------+
+                            |   Server Directory  |    |   plugins          |
+                            |   Navigation        |    |   (acsi_plugins)   |
+                            +--------------------+    +-------------------+
+```
+
+### Directory Structure
+
+```
+modules/so/
+├── pyproject.toml
+├── docker/Dockerfile
+├── tests/
+├── src/so/
+│   ├── acsi_client.py                  # Core IEC 61850 WebSocket client implementation (passive mode)
+│   │                                    # - ACSIClientRuntime: Runtime state management
+│   │                                    # - ACSIClient: Main client controller
+│   │                                    # - WebSocket connection management
+│   │                                    # - Model building and caching
+│   │                                    # - Server directory navigation
+│   │
+│   └── bff_endpoint.py                 # REST API (FastAPI) for client management
+│                                        # - Connection management (connect/disconnect)
+│                                        # - Server directory operations
+│                                        # - Model operations (get server/model tree)
+│                                        # - Data operations (read/write values)
+│                                        # - Action/message logging
+│                                        # - Plugins (decision 0021)
+│
+└── README.md                           # This file
+```
+
+## Key Components
+
+### 1. acsi_client.py - IEC 61850 WebSocket Client (Passive Mode)
+
+The core client implementation that handles:
+
+- **WebSocket connection lifecycle** (connect, disconnect, reconnect)
+- **IEC 61850 client instantiation** using ws61850 library
+- **Server directory navigation** (get server tree, logical devices, logical nodes)
+- **Model building and caching** from connected servers
+- **Async event loop management** for concurrent operations
+- **Runtime state tracking** (status, connections, errors)
+- **Message logging** (received and sent messages)
+- **Action tracking** for audit purposes
+- **Report handling** with callbacks for real-time updates
+
+#### Key Classes
+
+| Class | Purpose |
+|-------|---------|
+| `ModelInfo` | Manages model building state and data for each communication point |
+| `ACSIClientRuntime` | Manages client runtime state, connections, model, actions, messages |
+| `ACSIClient` | Main client controller with WebSocket endpoint integration |
+
+### 2. bff_endpoint.py - REST API (Backend for Frontend)
+
+A **FastAPI** application that provides REST endpoints for managing the ACSI client. Acts as a bridge between HTTP clients and the WebSocket-based IEC 61850 client in passive mode. For complete API documentation, open the interactive OpenAPI docs that FastAPI serves at
+`http://localhost:5000/docs` while the service runs.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.13+
+- Docker (optional, for containerized deployment)
+- A running IEC 61850 server (FSP or other ACSI server)
+- Required Python packages (see below)
+
+### Option 1: Docker (Recommended)
+
+#### Build and Run (from repository root)
+
+The build context must be the repository root - this Dockerfile also
+needs `src/ws61850` (the core library) and the shared uv workspace lock.
+
+```bash
+# Build the Docker image
+docker build -t netbeheernederland/iec61850-websocket/rti-so -f examples/rti-demo/modules/so/docker/Dockerfile .
+
+# Run the container
+docker run --rm -p 5000:5000 netbeheernederland/iec61850-websocket/rti-so
+
+# With custom network (for multi-container setup)
+docker network create rti-network
+docker run --rm -p 5000:5000 --network rti-network --name rti-so netbeheernederland/iec61850-websocket/rti-so
+```
+
+#### API Health Check
+
+```bash
+curl http://localhost:5000/api/iec61850client/status
+```
+
+### Option 2: Direct Python Execution (Without Docker)
+
+#### Install Dependencies
+
+From repository root - `so` is a member of the shared uv workspace
+(alongside `ws61850`, `fsp` and `bff`):
+
+```bash
+uv sync --all-packages
+```
+
+#### Run SO API
+
+From repository root:
+
+```bash
+# Default port (5000)
+uv run --package so python -m so.bff_endpoint
+
+# Custom port (Linux/macOS/WSL/Git Bash)
+PORT=5000 uv run --package so python -m so.bff_endpoint
+
+# Custom port (Windows PowerShell)
+$env:PORT="5000"
+uv run --package so python -m so.bff_endpoint
+```
+
+#### Health Check
+
+```bash
+curl http://localhost:5000/api/iec61850client/status
+```
+
+---
+
+## Plugins
+
+The SO connects to plugins: HTTP services, each linking ACSI to another integration, for example the IO server's
+LEDs, displays, buttons and potentiometers. The SO tells every plugin what happens (an association, a read, a write, an
+Operate answer, a report). No plugin is installed in
+the SO: it connects to the ones in its plugin configuration (`PLUGINS_FILE` or `PLUGINS`) at startup, and keeps
+trying the ones it can't reach. How plugins work, and how to write one: [`modules/plugins/README.md`](../plugins/README.md)
+and decisions [0021](../../../../docs/rti-demo/decisions/0021-acsi-plugin-host.md) and
+[0029](../../../../docs/rti-demo/decisions/0029-plugins-are-http-services.md). The contract, as OpenAPI 3.1, is
+[`modules/plugins/openapi.yaml`](../plugins/openapi.yaml); it also covers plugins' own routes, which this service's
+`/docs` doesn't list.
+
+### The IO plugin
+
+The IO server ([`rti-plugins/dr_panel`](../../../rti-plugins/dr_panel/README.md)) is the SO's IO plugin: compose
+configures it in `config/plugin-configuration/io/rti-so.json` (`http://dr-panel:9000/plugin`, with the overlay
+`docker-compose.io.yaml`; by default the SO connects to its own `dr_leds`), `launch.py` in `PLUGINS`
+(`http://localhost:9000/plugin`). Its configuration says `"write_inputs": false`, so the input devices write to the FSP. Which devices react to which event or objRef is the IO server's
+`io_mapping.json`; see the *Hardware demo* section of `examples/rti-demo/README.md`.
+
+```bash
+curl http://localhost:5000/api/plugins                     # connected plugins, health, and the ones not (yet) connected
+curl http://localhost:5000/api/plugins/dr_panel/leds             # the IO server's /api/io/leds
+curl -X PUT http://localhost:5000/api/plugins/dr_panel -H 'Content-Type: application/json' \
+  -d '{"settings": {}}'                                       # edit its url or settings; a failed edit changes nothing
+curl -X POST http://localhost:5000/api/plugins/dr_panel/reload   # ask it again what it is and start it again
+```
+
+---
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 5000 | REST API port |
+| `SO_LISTEN_ON_START` | `true` | Start the WebSocket server (passive endpoint) with the service; `false` waits for `POST /api/connect` |
+| `SO_WS_HOST` | `0.0.0.0` | Address the WebSocket server listens on at start |
+| `SO_WS_PORT` | 8765 | Port the WebSocket server listens on at start; the FSPs dial it |
+| `PLUGINS_FILE` | none | The plugin configuration: `{"host_url": ..., "plugins": [{"name", "url", "settings"}]}` |
+| `PLUGINS` | none | The same JSON inline; its plugins and `host_url` win over the file's |
+| `PLUGIN_HOST_URL` | the configuration's `host_url` | Where plugins reach this service, for example to write input changes back |
+| `PLUGIN_RETRY_SECONDS` | `10` | How often a configured plugin that isn't connected is tried again; `0`: never |
+| `LOG_LEVEL` | `info` | The log level at start: `critical`, `error`, `warning`, `info`, `debug`, `trace` or a number; `--log-level` wins over it. `PUT /api/log-level` changes it while the service runs (see below) |
+| `PLUGIN_ALLOWED_SOURCES` | `*` (any URL) | Comma-separated URLs that `POST /api/plugins` may add plugins from at runtime, and `PUT /api/plugins/{name}` may move one to. `*` stands for any host, any one part of it or any port (`http://192.168.0.*:8000`); `*` alone allows any URL, and set but empty allows none (decision [0037](../../../../docs/rti-demo/decisions/0037-plugin-allowed-sources-wildcards.md)) |
+
+### Log level while running
+
+`GET /api/log-level` gives the level the SO logs at now and the one it started with; `PUT /api/log-level` with
+`{"level": "debug"}` changes it, and `{"level": null}` goes back to the start level (spec
+[0011](../../../../docs/rti-demo/specs/0011-so-fsp-log-level-from-hmi.md)). It takes the names above in any case, or a
+number from 1 to 50; an unknown value is a 422 and changes nothing. The change is written to the actions log (kind
+`system`, so the Activity Log and Diagnostics show it) and to the container log. It applies to this instance only and
+is kept in memory: a restart goes back to `LOG_LEVEL` / `--log-level`. The `websockets` logger stays at the start
+level, since at debug it logs the WebSocket handshake headers, the bearer token among them. The HMI sets it from
+Monitoring on the ACSI Client page. The code is shared with the BFF, in
+[modules/common](../common/README.md).
+
+### Connection Defaults
+
+The WebSocket server listens on `0.0.0.0:8765` as soon as the SO starts (see `SO_LISTEN_ON_START`). `POST /api/connect`
+starts it again after a `POST /api/disconnect`; while it runs, `/api/connect` is refused.
+
+- **CP**: cp1 (communication point)
+
+---
+
+## Testing
+
+Run tests from the repository root:
+
+```bash
+uv run --package so pytest examples/rti-demo/modules/so/tests -q
+```
+
+See `examples/rti-demo/TESTING.md` for the other modules and the integration tests.
+
+---
+
+## Model Status Values
+
+| Status | Description |
+|--------|-------------|
+| `idle` | No model building in progress |
+| `building` | Model is being built from server |
+| `ready` | Model is ready for use |
+| `error` | Error occurred during model building |
+
+## Connection Status Values
+
+| Status | Description |
+|--------|-------------|
+| `disconnected` | Not connected to any server |
+| `connecting` | Connection attempt in progress |
+| `connected` | Successfully connected to server |
+| `disconnecting` | Disconnection in progress |
+| `error` | Connection error occurred |
+
+---
+
+## Integration
+
+### With FSP (Server)
+
+FSP connects to SO as a WebSocket client (SO in passive mode):
+
+```
+SO (Server, Port 5000) <--HTTP--> External Clients
+SO (WS Server, Passive) <--WebSocket--> FSP (Client)
+```
+
+### With the IO service
+
+SO integrates with the IO service to control physical IO devices through IEC 61850 objects.
+
+**Flow**: Write to IEC 61850 object -> SO sends to FSP -> FSP updates -> the IO service controls the physical device
+
+### Typical Setup
+
+```
++-----------+    +-----------+    +-----------+
+|           |    |           |    |           |
+|  Client   +--->+   SO      +--->+   FSP     |
+|  (HTTP)   |    | (BFF)     |    | (Server)  |
+|           |    | Port 5000 |    | Port 5001 |
++-----------+    +-----+-----+    +-----+-----+
+                  |                 |           |
+                  +-----------------+           |
+                                    |           |
+                                    v           v
+                              +-----------+-----------+
+                              | Physical Devices   |
+                              +-----------+-----------+
+                                    (via the IO service or direct)
+```
+
+---
+
+## Files Reference
+
+| File | Purpose | Key Classes/Functions |
+|------|---------|---------------------|
+| `acsi_client.py` | WebSocket client (passive mode) | ModelInfo, ACSIClientRuntime, ACSIClient |
+| `bff_endpoint.py` | REST API | FastAPI app, endpoint routes |
+| `docker/Dockerfile` | Container | Multi-stage build |
+
+---
+
+## License
+
+Part of the **RTI_DEMO** project. See main project for licensing information.

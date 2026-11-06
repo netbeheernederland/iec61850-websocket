@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Python
 __pycache__/
 *.py[cod]
@@ -34,7 +38,11 @@ ENV/
 *.swo
 *~
 
+# Node
+**/node_modules/
+
 # Claude Code
+**/.claude/settings.local.json
 .claude/settings.local.json
 
 # Environment
@@ -65,3 +73,22 @@ Thumbs.db
 # Resource or info files
 resources.txt
 **/data/client_credentials.json
+
+# RTI Demo - local configuration and generated files
+examples/rti-demo/modules/bff/src/bff/playbooks/
+launch_config.json
+examples/rti-demo/config/io_config.json
+examples/rti-demo/config/io_mapping.json
+# Plugins the FSP and SO downloaded when run with launch.py (decision 0021)
+examples/rti-demo/config/plugins/
+*.local.json
+*.pid
+*.bak
+.docker/
+stats.json
+launch.py.local
+config.local.py
+# Doxygen output - generate with: doxygen docs/doxygen/Doxyfile
+docs/doxygen/html/
+
+*.drawio.bkp

@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "bff"
+version = "0.1.0"
+description = "RTI Demo BFF (Backend for Frontend) service"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.139.0",
+    # [standard] extra pulls in the 'websockets' library uvicorn needs to
+    # actually serve /ws - without it every WebSocket upgrade 404s (uvicorn
+    # logs "No supported WebSocket library detected" and falls through to
+    # its default 404 handler), silently killing the BFF's whole live-push
+    # mechanism (push_relay_loop -> ws_hub) - the HMI then only ever sees
+    # fresh connection/status data on mount or a manual reload, never live.
+    "uvicorn[standard]>=0.51.0",
+    "requests==2.32.5",
+    "httpx2>=2.13.0",
+    "docker==6.1.0",
+    "pyyaml>=6.0",
+    # Reads certificate details for GET /api/certs (bff.cert_store).
+    "cryptography>=46.0",
+    "rti-common",
+]
+
+[tool.uv.sources]
+rti-common = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bff = ["connections.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: fast, isolated unit tests (no Docker/network required)",
+]

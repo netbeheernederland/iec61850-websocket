@@ -1,0 +1,210 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Image names follows ${RTI_IMAGE_REPO}/rti-<role>:${RTI_IMAGE_TAG}
+# defaulting to netbeheernederland/iec61850-websocket/rti-<role>:latest, so
+# a local `docker compose build` produces exactly the images the demo runs.
+# Point RTI_IMAGE_REPO at ghcr.io/netbeheernederland/iec61850-websocket to
+# pull the images published from GitHub instead - see README.md "Docker".
+#
+# The FSPs and SO connect to their plugins from the plugin configuration in
+# config/plugin-configuration/ (decision 0029): by default one dr_leds each,
+# which the overlay docker-compose.leds.yaml runs (decision 0034). The IO
+# server, dr-panel, is opt-in: the overlay docker-compose.io.yaml runs it and
+# connects the FSPs and SO to it instead (on the Raspberry Pi with dr_panel's
+# docker-compose.pi.yaml for its devices; decision 0028 has its own stack). A plugin that
+# isn't reachable is retried, and the rest of the demo works.
+services:
+  # BFF Server
+  rti-bff:
+    image: ${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/rti-bff:${RTI_IMAGE_TAG:-latest}
+    build:
+      # Repo root, not modules/bff/ - the Dockerfile needs the shared uv
+      # workspace lock and the ws61850 core library at src/, both of which
+      # live outside modules/bff/.
+      context: ../..
+      dockerfile: examples/rti-demo/modules/bff/docker/Dockerfile
+    container_name: rti-bff
+    ports:
+      - "3000:3000"
+    environment:
+      # PORT/PYTHONUNBUFFERED already set (matching defaults) by the
+      # Dockerfile - only override what's actually different here.
+      # Persist connection state in a dedicated /config dir (named volume below),
+      # not in the root-owned WORKDIR /app or the ./modules/bff code mount. The
+      # atomic save (temp file + rename in the same dir) needs a real, writable
+      # dir - a single-file bind mount would also break os.replace() with EBUSY.
+      - BFF_CONNECTIONS_FILE=/config/connections.json
+      # Playbooks saved from the HMI (recordings, uploads), on the config volume.
+      - BFF_PLAYBOOKS_DIR=/config/playbooks
+      # One LOG_LEVEL for the whole stack (spec 0008).
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - bff-config:/config
+      - ./playbooks:/app/examples/rti-demo/playbooks:ro
+      # TLS certificates (testing/certs), listed for the HMI by GET /api/certs.
+      - ${RTI_CERTS_DIR:-../../testing/certs}:/certs:ro
+    networks:
+      - rti-network
+    # Health check already defined in the Dockerfile (with matching timing).
+    labels:
+      - "rti.service=rti-bff"
+      - "rti.type=RTI-BFF"
+      - "rti.host=rti-bff"
+      - "rti.port=3000"
+
+  # HMI Web Server
+  rti-hmi:
+    image: ${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/rti-hmi:${RTI_IMAGE_TAG:-latest}
+    build:
+      context: modules/hmi
+      dockerfile: docker/Dockerfile
+      args:
+        # Optional build-time BFF address, baked into the bundle.
+        VITE_BFF_HOST: ${VITE_BFF_HOST:-}
+        VITE_BFF_PORT: ${VITE_BFF_PORT:-}
+    container_name: rti-hmi
+    environment:
+      # BFF address as the user's browser reaches it, applied when the
+      # container starts (wins over the build args). Empty: the build args,
+      # else localhost:3000. See modules/hmi/README.md.
+      - BFF_HOST=${HMI_BFF_HOST:-}
+      - BFF_PORT=${HMI_BFF_PORT:-}
+      # One LOG_LEVEL for the whole stack (spec 0008): the browser console's
+      # level and nginx's error log.
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # The nginx image's entrypoint, quiet: no "/docker-entrypoint.sh: ..."
+      # lines at start. 40-rti-config.sh still says what it set.
+      # HMI_NGINX_ENTRYPOINT_QUIET_LOGS= (empty) shows them again.
+      - NGINX_ENTRYPOINT_QUIET_LOGS=${HMI_NGINX_ENTRYPOINT_QUIET_LOGS-1}
+    ports:
+      - "8080:80"
+    depends_on:
+      rti-bff:
+        condition: service_healthy
+    networks:
+      - rti-network
+    # Health check already defined in the Dockerfile.
+
+  # RTI-FSP (Acsi-Server)
+  rti-fsp01:
+    image: ${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/rti-fsp:${RTI_IMAGE_TAG:-latest}
+    build:
+      # Repo root, not modules/fsp - the Dockerfile needs the shared uv
+      # workspace lock and the ws61850 core library at src/, both of which
+      # live outside modules/fsp.
+      context: ../..
+      dockerfile: examples/rti-demo/modules/fsp/docker/Dockerfile
+    container_name: rti-fsp01
+    ports:
+      - "5001:5001"
+    environment:
+      # PORT/PYTHONUNBUFFERED already set (matching defaults) by the Dockerfile.
+      - CP=cp1
+      - MODEL_PATH=/models/model_1.py
+      # One LOG_LEVEL for the whole stack (spec 0008).
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # The ACSI server starts with the FSP, not connected (decision 0033);
+      # FSP_AUTOCONNECT=true also dials out to the SO here.
+      - FSP_SO_HOST=rti-so
+      # The plugins it connects to: dr_leds, or the IO server with
+      # docker-compose.io.yaml (decisions 0029, 0034).
+      - PLUGINS_FILE=/plugins/plugins.json
+    networks:
+      - rti-network
+    # Health check already defined in the Dockerfile.
+    labels:
+      - "rti.service=rti-fsp01"
+      - "rti.type=RTI-FSP"
+      - "rti.host=rti-fsp01"
+      - "rti.port=5001"
+    volumes:
+        - ./config/models:/models
+        - ./config/plugin-configuration/rti-fsp01.json:/plugins/plugins.json:ro
+        # TLS certificates (testing/certs), referenced as file:<name>
+        # (e.g. file:ca.pem). See README.md "TLS certificates".
+        - ${RTI_CERTS_DIR:-../../testing/certs}:/certs:ro
+
+  # Second FSP instance
+  rti-fsp02:
+    image: ${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/rti-fsp:${RTI_IMAGE_TAG:-latest}
+    build:
+      # Repo root - see rti-fsp01's build.context comment above.
+      context: ../..
+      dockerfile: examples/rti-demo/modules/fsp/docker/Dockerfile
+    container_name: rti-fsp02
+    ports:
+      - "5005:5005"  # Map to different host port, same container port
+    networks:
+      - rti-network
+    environment:
+      # PORT overrides the Dockerfile's default 5001 - this is a second
+      # instance of the same image, on a different port. PYTHONUNBUFFERED
+      # already set by the Dockerfile.
+      - PORT=5005
+      - CP=cp2
+      - MODEL_PATH=/models/model_2.py
+      # One LOG_LEVEL for the whole stack (spec 0008).
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # The ACSI server starts with the FSP, not connected (decision 0033);
+      # FSP_AUTOCONNECT=true also dials out to the SO here.
+      - FSP_SO_HOST=rti-so
+      # The plugins it connects to: dr_leds, or the IO server with
+      # docker-compose.io.yaml (decisions 0029, 0034).
+      - PLUGINS_FILE=/plugins/plugins.json
+    # Healthcheck already defined in the Dockerfile - it reads $PORT at
+    # check time (see modules/fsp/docker/Dockerfile), so it correctly
+    # targets 5005 for this second instance without needing to be
+    # hardcoded here again.
+    labels:
+      - "rti.service=rti-fsp02"
+      - "rti.type=RTI-FSP"
+      - "rti.host=rti-fsp02"
+      - "rti.port=5005"
+    volumes:
+      - ./config/models:/models
+      - ./config/plugin-configuration/rti-fsp02.json:/plugins/plugins.json:ro
+      - ${RTI_CERTS_DIR:-../../testing/certs}:/certs:ro
+
+  # RTI SO (Acsi-Client)
+  rti-so:
+    image: ${RTI_IMAGE_REPO:-netbeheernederland/iec61850-websocket}/rti-so:${RTI_IMAGE_TAG:-latest}
+    build:
+      # Repo root, not modules/so - the Dockerfile needs the shared uv
+      # workspace lock and the ws61850 core library at src/, both of which
+      # live outside modules/so.
+      context: ../..
+      dockerfile: examples/rti-demo/modules/so/docker/Dockerfile
+    container_name: rti-so
+    hostname: rti-so
+    ports:
+      - "5000:5000"
+      - "8765:8765"    # WebSocket port - MUST ADD
+    # PORT/PYTHONUNBUFFERED and health check already set by the Dockerfile.
+    environment:
+      # The plugins it connects to: dr_leds, or the IO server with
+      # docker-compose.io.yaml (decisions 0029, 0034).
+      - PLUGINS_FILE=/plugins/plugins.json
+      # One LOG_LEVEL for the whole stack (spec 0008).
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    networks:
+      - rti-network
+    labels:
+      - "rti.service=rti-so"
+      - "rti.type=RTI-SO"
+      - "rti.host=rti-so"
+      - "rti.port=5000"
+    volumes:
+      - ./config/plugin-configuration/rti-so.json:/plugins/plugins.json:ro
+      # TLS certificates (testing/certs), referenced as file:<name>
+      # (e.g. file:server.pem).
+      - ${RTI_CERTS_DIR:-../../testing/certs}:/certs:ro
+
+volumes:
+  # Persistent BFF runtime state (connections.json), mounted at /config.
+  bff-config:
+
+networks:
+  rti-network:
+    external: true

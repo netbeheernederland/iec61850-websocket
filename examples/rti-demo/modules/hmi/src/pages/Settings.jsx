@@ -1,0 +1,326 @@
+/*
+ * SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Copyright 2025-2026 Netbeheer Nederland
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  LOG_LEVEL_NAMES,
+  describeLogLevel,
+  getLogLevel,
+  getStoredLogLevel,
+  getUrlLogLevel,
+  log,
+  resolveServerLogLevel,
+  setStoredLogLevel,
+} from '../utils/log';
+import LogLevelSelect from '../components/LogLevelSelect';
+import { getBffLogLevel, setBffLogLevel } from '../services/apiService';
+
+// Max time to wait for the BFF /api/health probe before giving up.
+const HEALTH_TIMEOUT_MS = 4000;
+
+const isValidPort = (port) => {
+  const n = Number(port);
+  return Number.isInteger(n) && n >= 1 && n <= 65535;
+};
+
+function Settings({ settings, setSettings }) {
+  const [localSettings, setLocalSettings] = useState({ ...settings });
+  const [refreshSettings, setRefreshSettings] = useState({
+    connectionStatusPeriod: '10000',
+    autoRefreshToggle: '5000'
+  });
+  const [bffConnectionStatus, setBffConnectionStatus] = useState({
+    connected: false,
+    text: 'Not checked',
+    color: 'var(--text-muted)'
+  });
+
+  // The HMI's log level (spec 0008): kept in localStorage, applied on change.
+  const [logLevelChoice, setLogLevelChoice] = useState(() => getStoredLogLevel() || '');
+  const [activeLogLevel, setActiveLogLevel] = useState(getLogLevel);
+  const serverLogLevel = resolveServerLogLevel();
+  const urlLogLevel = getUrlLogLevel();
+
+  // The BFF's own log level (spec 0010): read from the BFF last checked,
+  // again after each check that succeeds.
+  const [bffChecked, setBffChecked] = useState({ base: null, count: 0 });
+  const loadBffLogLevel = useCallback(() => getBffLogLevel(bffChecked.base), [bffChecked.base]);
+  const saveBffLogLevel = useCallback((level) => setBffLogLevel(level, bffChecked.base), [bffChecked.base]);
+
+  const syncedSettingsRef = useRef(JSON.stringify(settings));
+  const didMountRef = useRef(false);
+
+
+  useEffect(() => {
+    const saved = localStorage.getItem('rti-hmi-refresh-settings');
+    if (saved) {
+      try {
+        setRefreshSettings(prev => ({ ...prev, ...JSON.parse(saved) }));
+      } catch (e) {
+        log.warn(`Failed to parse rti-hmi-refresh-settings: ${e.message}`);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const settingsStr = JSON.stringify(settings);
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    if (settingsStr !== syncedSettingsRef.current) {
+      syncedSettingsRef.current = settingsStr;
+      setLocalSettings({ ...settings });
+    }
+  }, [settings]);
+
+  const checkBffConnection = useCallback(async (
+    host = localSettings.bffHost,
+    port = localSettings.bffPort,
+    externalSignal
+  ) => {
+    if (!host || !isValidPort(port)) {
+      setBffConnectionStatus({
+        connected: false,
+        text: 'Invalid host or port',
+        color: 'var(--danger-color)'
+      });
+      return false;
+    }
+    if (externalSignal?.aborted) {
+      return false;
+    }
+
+    setBffConnectionStatus({
+      connected: false,
+      text: 'Checking…',
+      color: 'var(--text-muted)'
+    });
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, HEALTH_TIMEOUT_MS);
+    const onExternalAbort = () => controller.abort();
+    externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+
+    try {
+      const response = await fetch(`http://${host}:${port}/api/health`, { signal: controller.signal });
+      if (response.ok) {
+        setBffChecked(prev => ({ base: `http://${host}:${port}`, count: prev.count + 1 }));
+        setBffConnectionStatus({
+          connected: true,
+          text: 'Connected',
+          color: 'var(--success-color)'
+        });
+        return true;
+      }
+      setBffConnectionStatus({
+        connected: false,
+        text: 'Disconnected',
+        color: 'var(--danger-color)'
+      });
+      return false;
+    } catch (error) {
+      if (externalSignal?.aborted && !timedOut) {
+        return false;
+      }
+      setBffConnectionStatus({
+        connected: false,
+        text: timedOut ? 'Connection timed out' : 'Connection failed',
+        color: 'var(--danger-color)'
+      });
+      return false;
+    } finally {
+      clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+    }
+  }, [localSettings.bffHost, localSettings.bffPort]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      checkBffConnection(undefined, undefined, controller.signal);
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [checkBffConnection]);
+
+  const handleSaveSettings = () => {
+    if (!localSettings.bffHost || !isValidPort(localSettings.bffPort)) {
+      alert('Please enter a valid host and a port between 1 and 65535.');
+      return;
+    }
+
+    const normalized = { ...localSettings, bffPort: Number(localSettings.bffPort) };
+    const normalizedStr = JSON.stringify(normalized);
+
+    localStorage.setItem('rti-hmi-settings', normalizedStr);
+    localStorage.setItem('rti-hmi-refresh-settings', JSON.stringify(refreshSettings));
+
+    syncedSettingsRef.current = normalizedStr;
+    setLocalSettings(normalized);
+    setSettings(normalized);
+
+    checkBffConnection(normalized.bffHost, normalized.bffPort);
+  };
+
+  const handleInputChange = (e) => {
+    const { id, value } = e.target;
+    const keyMap = { 'bff-host': 'bffHost', 'bff-port': 'bffPort' };
+    const key = keyMap[id] || id;
+    setLocalSettings(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleLogLevelChange = (e) => {
+    setLogLevelChoice(e.target.value);
+    setActiveLogLevel(setStoredLogLevel(e.target.value || null));
+  };
+
+  const handleRefreshInputChange = (e) => {
+    const { id, value } = e.target;
+    setRefreshSettings(prev => ({
+      ...prev,
+      [id]: value
+    }));
+  };
+
+  return (
+    <section className="page">
+      <div className="page-header">
+        <h1>Settings</h1>
+      </div>
+      <div className="settings-section">
+        <div className="settings-group">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+            <h3>BFF Server Configuration</h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ color: bffConnectionStatus.color, fontWeight: '600' }}>
+                {bffConnectionStatus.text}
+              </span>
+              <span
+                className="bff-status-dot"
+                style={{
+                  background: bffConnectionStatus.connected ? 'var(--success-color)' : 'var(--danger-color)'
+                }}
+              ></span>
+            </div>
+          </div>
+
+          <div className="setting-item" style={{ display: 'block' }}>
+            <label htmlFor="bff-host">BFF Server Host</label>
+            <input
+              type="text"
+              id="bff-host"
+              value={localSettings.bffHost}
+              onChange={handleInputChange}
+              style={{ width: '100%', maxWidth: '300px' }}
+            />
+          </div>
+          <div className="setting-item" style={{ display: 'block' }}>
+            <label htmlFor="bff-port">BFF Server Port</label>
+            <input
+              type="number"
+              id="bff-port"
+              value={localSettings.bffPort}
+              onChange={handleInputChange}
+              style={{ width: '100%', maxWidth: '300px' }}
+            />
+          </div>
+
+          <LogLevelSelect
+            id="bff-log-level"
+            label="BFF log level"
+            load={loadBffLogLevel}
+            save={saveBffLogLevel}
+            disabled={!bffConnectionStatus.connected || !bffChecked.base}
+            disabledText="Connect to the BFF to see its log level."
+            hint="What the BFF writes to its log. Applies straight away, for every user, until the BFF restarts."
+            reloadKey={bffChecked.count}
+          />
+
+          <button className="btn-primary" id="btn-save-settings" onClick={handleSaveSettings}>
+            <i className="fas fa-save"></i>
+            Save Settings and Test BFF Connection
+          </button>
+        </div>
+
+        <div className="settings-group">
+          <h3>Logging</h3>
+          <div className="setting-item" style={{ display: 'block' }}>
+            <label htmlFor="log-level">HMI log level (this browser)</label>
+            <select
+              id="log-level"
+              value={logLevelChoice}
+              onChange={handleLogLevelChange}
+              style={{ width: '100%', maxWidth: '300px' }}
+            >
+              <option value="">From the server ({serverLogLevel.name})</option>
+              {LOG_LEVEL_NAMES.map(name => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+            <p style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '6px' }}>
+              What the HMI logs in the browser console. Applies straight away and is
+              kept in this browser. In use: <span id="log-level-in-use">{describeLogLevel(activeLogLevel)}</span>.
+              {urlLogLevel && ` ?log=${urlLogLevel} in the URL wins over this choice until the page is reloaded without it.`}
+            </p>
+          </div>
+        </div>
+
+        <div className="settings-group">
+          <h3>Data Auto-Refresh</h3>
+          <div className="setting-item" style={{ display: 'block' }}>
+            <label htmlFor="autoRefreshToggle">Auto-Refresh Interval (ms)</label>
+            <input
+              type="number"
+              id="autoRefreshToggle"
+              min="1000"
+              step="500"
+              value={refreshSettings.autoRefreshToggle}
+              onChange={handleRefreshInputChange}
+              style={{ width: '100%', maxWidth: '300px' }}
+            />
+            <p style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '6px' }}>
+              How often the Data Access Panel re-reads the selected value when its
+              "Auto-refresh" checkbox is enabled. Click Save to apply.
+            </p>
+          </div>
+          <button className="btn-primary" id="btn-save-refresh-settings" onClick={handleSaveSettings}>
+            <i className="fas fa-save"></i>
+            Save Settings
+          </button>
+        </div>
+
+        <div className="settings-group" style={{ display: 'none' }}>
+          <h3>Display Settings</h3>
+          <div className="setting-item" style={{ display: 'flex', alignItems: 'center' }}>
+            <label>
+              <input type="checkbox" id="dark-mode-toggle" defaultChecked />
+              Dark Mode
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export default Settings;

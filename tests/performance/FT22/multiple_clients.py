@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,25 +21,26 @@ import os
 import sys
 from pathlib import Path
 
-from ws61850.endpoint.endpoint import WebSocketEndpoint
+from ws61850.endpoint.active_endpoint import ActiveEndpoint
+from ws61850.iec61850.data_model import IedModelLoader
 from ws61850.iec61850.server.iec61850_server import IEC61850Server
 
-_project_root = Path(__file__).resolve().parents[3]
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-from testing.ieds.high_level_model import make_ied_model1  # noqa: E402
+_MODEL_PATH = (
+    Path(__file__).resolve().parents[3] / "testing" / "ieds" / "ied_model1.json"
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     stream=sys.stdout,
 )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="WebSocketClient + IEC61850-Controller")
+    parser = argparse.ArgumentParser(
+        description="WebSocketClient + IEC61850-Controller"
+    )
     default_host = os.getenv("WS_SERVER_HOST", "localhost")
     port = os.getenv("WS_SERVER_PORT", "8765")
     if port is None:
@@ -90,11 +91,11 @@ def parse_args() -> argparse.Namespace:
 
 
 async def create_ws_clients(cp, task_list, args):
-    ep_ws_client = WebSocketEndpoint()
-    iec61850_server = IEC61850Server(make_ied_model1(), cp)
-    ep_ws_client.add_iec61850_server(iec61850_server)
+    endpoint = ActiveEndpoint()
+    iec61850_server = IEC61850Server(IedModelLoader.from_file(_MODEL_PATH), cp)
+    endpoint.add_iec61850_server(iec61850_server)
 
-    controller_task = asyncio.create_task(ep_ws_client.start("active", args.host, args.port, cp))
+    controller_task = asyncio.create_task(endpoint.start(args.host, args.port, cp))
     task_list.append(controller_task)
 
     if args.report:
@@ -112,7 +113,7 @@ async def main():
 
     for pocc_num in range(args.start, args.stop + 1):
         pocc_id = f"EAN{pocc_num:03}"
-        logger.info(f"Registering IEC61850 Controller on WS-Client with ID: {pocc_id}")
+        logger.info("Registering IEC61850 Controller on WS-Client with ID: %s", pocc_id)
         await create_ws_clients(pocc_id, task_list, args)
         if args.delay > 0:
             await asyncio.sleep(args.delay)

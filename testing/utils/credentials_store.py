@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -45,4 +45,6 @@ def save_credentials(full_path: Path, credentials: list[dict[str, Any]]) -> None
         with full_path.open("w", encoding="utf-8") as file:
             json.dump(credentials, file, indent=4)
     except OSError as error:
-        raise OSError(f"Unable to write credentials file {full_path}: {error}") from error
+        raise OSError(
+            f"Unable to write credentials file {full_path}: {error}"
+        ) from error

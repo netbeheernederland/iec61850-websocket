@@ -1,30 +1,212 @@
 THIRD-PARTY LICENSES
 
-This project bundles the following third-party Python packages:
+The project's own code is Apache-2.0 (LICENSE); CODE_OF_CONDUCT.md is CC-BY-4.0. This file lists the third-party
+software the project depends on, by license, with the SPDX identifier of each. The full texts of these licenses are in
+docs/LICENSES/. Nothing third-party is copied into the repository: packages are installed from PyPI and npm when
+building, and the versions are pinned in the lock files (uv.lock, examples/rti-plugins/*/uv.lock,
+examples/rti-demo/modules/hmi/package-lock.json).
 
-MIT License:
-- asn1tools
-- bitstruct
-- charset-normalizer
-- PyJWT
-- pyparsing
-- urllib3
-- black
-- ruff
+Checked against the lock files on 2026-11-03.
 
-BSD 3-Clause License:
-- websockets
-- idna
-- pycparser
-- Flask
+Licenses in use:
 
-Apache License 2.0:
-- requests
-- aiohttp
-- cryptography (dual licensed)
+  In what the components run or ship (sections 1 to 3):
+    MIT, BSD-3-Clause, Apache-2.0, PSF-2.0, MPL-2.0, LGPL-2.1-or-later, CC-BY-4.0 and OFL-1.1 (Font Awesome),
+    and BSD-2-Clause as an option of a dual license
+  Only in development and build tools (sections 4 and 5):
+    ISC, MIT-0, BlueOak-1.0.0, CC0-1.0, and MPL-2.0, BSD-2-Clause as well
 
-Mozilla Public License 2.0:
-- certifi
+Dual-licensed packages are listed under their whole expression: "A OR B" may be used under either license,
+"A AND B" under both (parts of the package are under each).
 
-MIT No Attribution:
-- cffi
+
+1. PYTHON PACKAGES AT RUN TIME
+
+What the library (iec61850-websocket, src/ws61850) and the RTI demo's services need to run, from uv.lock (the library,
+SO, FSP, BFF and plugin host, a uv workspace) and the plugins' own locks (dr_panel, dr_leds). After each package: the
+components that use it. The SO and FSP use the library, so they list its packages too.
+
+MIT:
+  - adafruit-ads1x15    dr_panel
+  - adafruit-gpio       dr_panel
+  - adafruit-pureio     dr_panel
+  - annotated-doc       SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - annotated-types     SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - anyio               SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - asn1tools           library, SO, FSP
+  - attrs               library, SO, FSP
+  - bitstruct           library, SO, FSP
+  - blinker             library, SO, FSP
+  - cffi                library, SO, FSP, BFF
+  - charset-normalizer  library, SO, FSP, BFF
+  - fastapi             SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - h11                 SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - httptools           BFF
+  - pydantic            SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - pydantic-core       SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - pyjwt               library, SO, FSP
+  - pyparsing           library, SO, FSP
+  - pyyaml              BFF
+  - setuptools          dr_panel
+  - smbus2              dr_panel
+  - spidev              dr_panel
+  - truststore          SO, FSP, BFF, plugin host, dr_panel
+  - typing-inspection   SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - urllib3             library, SO, FSP, BFF
+  - watchfiles          BFF
+
+BSD-3-Clause:
+  - click           library, SO, FSP, BFF, dr_panel, dr_leds
+  - colorama        library, SO, FSP, BFF; Windows only
+  - colorzero       dr_panel
+  - flask           library, SO, FSP
+  - gpiozero        dr_panel
+  - httpcore2       SO, FSP, BFF, plugin host, dr_panel
+  - httpx2          SO, FSP, BFF, plugin host, dr_panel
+  - httpx2-jsfetch  SO, FSP, BFF, plugin host, dr_panel
+  - idna            library, SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - itsdangerous    library, SO, FSP
+  - jinja2          library, SO, FSP
+  - markupsafe      library, SO, FSP
+  - pycparser       library, SO, FSP, BFF
+  - python-dotenv   BFF
+  - starlette       SO, FSP, BFF, plugin host, dr_panel, dr_leds
+  - uvicorn         SO, FSP, BFF, dr_panel, dr_leds
+  - websockets      library, SO, FSP, BFF
+  - werkzeug        library, SO, FSP
+
+Apache-2.0:
+  - aiosignal          library, SO, FSP
+  - docker             BFF
+  - frozenlist         library, SO, FSP
+  - multidict          library, SO, FSP
+  - opentelemetry-api  dr_leds
+  - propcache          library, SO, FSP
+  - python-multipart   FSP
+  - requests           library, SO, FSP, BFF
+  - websocket-client   BFF
+  - yarl               library, SO, FSP
+
+PSF-2.0:
+  - aiohappyeyeballs   library, SO, FSP
+  - pywin32            BFF; Windows only
+  - typing-extensions  SO, FSP, BFF, plugin host, dr_panel, dr_leds
+
+Apache-2.0 AND MIT:
+  - aiohttp  library, SO, FSP
+
+Apache-2.0 OR BSD-2-Clause:
+  - packaging  BFF
+
+Apache-2.0 OR BSD-3-Clause:
+  - cryptography  library, SO, FSP, BFF
+
+LGPL-2.1-or-later:
+  - gpiod  dr_panel
+
+MIT OR Apache-2.0:
+  - uvloop  BFF; not on Windows
+
+MPL-2.0:
+  - certifi  library, SO, FSP, BFF
+
+Notes:
+  - gpiod (LGPL-2.1-or-later) is only in the dr_panel plugin and its image, which talks to the Raspberry Pi's GPIO
+    through it. It is the one copyleft license among the dependencies: the dr_panel image carries gpiod under the
+    LGPL's terms, which ask among other things that its source is available to whoever gets the image.
+  - certifi (MPL-2.0) is a weak copyleft at file level: changes to certifi's own files would be published under the
+    MPL; using it as is asks nothing more.
+  - pywin32 and colorama are installed on Windows only, uvloop everywhere but Windows; the images, on Linux, have
+    uvloop and neither colorama nor pywin32.
+
+
+2. JAVASCRIPT PACKAGES IN THE HMI'S BUNDLE
+
+The npm packages Vite bundles into the HMI (examples/rti-demo/modules/hmi), the dependencies in package.json and
+theirs, from package-lock.json. The bundle is served by the rti-hmi image.
+
+MIT:
+  - @babel/runtime
+  - @codemirror/autocomplete
+  - @codemirror/commands
+  - @codemirror/lang-json
+  - @codemirror/language
+  - @codemirror/lint
+  - @codemirror/search
+  - @codemirror/state
+  - @codemirror/streamparser
+  - @codemirror/theme-one-dark
+  - @codemirror/view
+  - @lezer/common
+  - @lezer/highlight
+  - @lezer/json
+  - @lezer/lr
+  - @marijn/find-cluster-break
+  - @uiw/codemirror-extensions-basic-setup
+  - @uiw/react-codemirror
+  - codemirror
+  - cookie
+  - crelt
+  - react
+  - react-dom
+  - react-router
+  - react-router-dom
+  - scheduler
+  - set-cookie-parser
+  - style-mod
+  - w3c-keyname
+
+
+3. LOADED BY THE BROWSER
+
+The HMI's index.html and src/index.css load Font Awesome Free 6.4.0 from cdnjs.cloudflare.com; it isn't in the
+repository or the image. Font Awesome Free is licensed in three parts:
+
+  - the icons        CC-BY-4.0
+  - the fonts        OFL-1.1
+  - the code (CSS)   MIT
+
+
+4. PYTHON DEVELOPMENT TOOLS
+
+The dev dependency groups in uv.lock: tests and linting. They aren't part of the library, the services or the images.
+
+MIT:
+  - iniconfig
+  - pluggy
+  - pytest
+  - ruff
+
+Apache-2.0:
+  - pytest-asyncio
+
+BSD-2-Clause:
+  - pygments
+
+
+5. JAVASCRIPT BUILD AND TEST TOOLS
+
+The HMI's devDependencies and theirs (123 packages): Vite, Vitest, the React plugin, Testing Library, jsdom and what
+they use. They build and test the HMI and don't end up in the bundle. By license, with the packages under the less
+common ones:
+
+  MIT:           96 packages
+  MPL-2.0:       12 packages: lightningcss (and its 11 platform binaries)
+  Apache-2.0:    4 packages
+  ISC:           3 packages
+  BSD-2-Clause:  2 packages: entities, webidl-conversions
+  BSD-3-Clause:  2 packages: source-map-js, tough-cookie
+  MIT-0:         2 packages: @csstools/color-helpers, @csstools/css-syntax-patches-for-csstree
+  BlueOak-1.0.0: 1 package: lru-cache
+  CC0-1.0:       1 package: mdn-data
+
+
+6. CONTAINER BASE IMAGES
+
+The Dockerfiles build on images whose operating system packages keep their own licenses (among them GPL and LGPL ones,
+as in any Linux distribution); see each image's own documentation. Not listed here:
+
+  - python:3.13-slim-bookworm, python:3.13-slim   runtime of the SO, FSP, BFF, dr_panel and dr_leds (Debian)
+  - nginx:alpine                                  runtime of the HMI (nginx: BSD-2-Clause; Alpine Linux)
+  - node:26.9.0-alpine                            build stage of the HMI only
+  - ghcr.io/astral-sh/uv:python3.13-bookworm-slim build stage of the SO, FSP and BFF only

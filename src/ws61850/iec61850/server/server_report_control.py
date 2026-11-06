@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -41,7 +41,7 @@ timestamp_zero = {
     "secondSinceEpoch": 0,  # Example: some UTC time in seconds
     "fractionOfSecond": 0,  # Example: partial seconds (e.g., microseconds * 10)
     "timeQuality": {
-        "leapSecondsKown": False,
+        "leapSecondsKnown": False,
         "clockFailure": False,
         "clockNotSynchronized": False,
         "timeAccuracy": 0,  # e.g., ±1 ms, depending on definition

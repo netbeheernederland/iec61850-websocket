@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,18 +15,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 import re
 
 from ws61850.iec61850.data_model.ied_model import (
     DataAttribute,
-    DataAttributeType,
     DataObject,
-    IedModel,
     LogicalDevice,
     LogicalNode,
 )
+from ws61850.shared.tree_render import print_node_da, print_structure
 
 logger = logging.getLogger(__name__)
 
@@ -128,50 +126,6 @@ def retrieve_set_result(response):
     return val
 
 
-def retrieve_associate_id(response_raw):
-    """
-    Extracts association id from associateResponse
-    """
-    response = json.loads(response_raw)
-
-    try:
-        return response["associate"]["service"]["associateResponse"]["associateId"]
-    except (KeyError, TypeError) as e:
-        raise ValueError("Invalid structure for associateId extraction") from e
-
-
-def retrieve_associate_id_from_decoded_msg(decoded_msg):
-    """
-    Extracts association id from associateResponse from a decoded message
-    """
-    try:
-        return decoded_msg[1][1][1]["associateId"]
-    except (KeyError, TypeError) as e:
-        raise ValueError("Invalid structure for associateId extraction") from e
-
-
-def retrieve_max_outstanding_calls_from_decoded_msg(decoded_msg):
-    """
-    Extracts association id from associateResponse from a decoded message
-    """
-    try:
-        return decoded_msg[1][1][1]["maxOutstandingCalls"]
-    except (KeyError, TypeError) as e:
-        return 0
-        # raise ValueError("Invalid structure for max outstanding calls extraction") from e
-
-
-def retrieve_max_message_size(response_raw):
-    """
-    Extracts the max message size from associateResponse
-    """
-    response = json.loads(response_raw)
-    try:
-        return response["associate"]["service"]["associateResponse"]["maxMessageSize"]
-    except (IndexError, KeyError, TypeError):
-        raise ValueError("Invalid TPAA structure for maxMessageSize")
-
-
 def retrieve_sdos(da_def):
     """
     Extracts the name of sub data attributes from getDataDefinition response
@@ -208,265 +162,64 @@ def retrieve_attributes_sdo(da_def, sdo_name):
                     print_structure(structure_list, da_index, len(da_refs), 1)
 
 
-def print_node(index, item, last_index):
-    """
-    prints sdos in the reconstructed tree in the console
-    """
-    sdo_prefix = "          ├── " if index != last_index - 1 else "          └── "
-    logger.info(f"{sdo_prefix}{item}")
-
-
-def print_node_da(index, item, last_index, go_to_next_level, is_structure):
-    """
-    prints the data attributes in the reconstructed tree in the console
-    """
-    if is_structure:
-        sdo_prefix = "               └── "
-    else:
-        sdo_prefix = "               ├── " if index != last_index - 1 else "               └── "
-    if go_to_next_level > 0:
-        logger.info(go_to_next_level * "     " + f"{sdo_prefix}{item}")
-    else:
-        logger.info(f"{sdo_prefix}{item}")
-
-
-def print_structure(structure_list, item_index, list_len, go_to_next_level):
-    """
-    Prints structured items in the reconstructed tree in the console
-    """
-    for index, struct_item in enumerate(structure_list):
-        if next(iter(struct_item["cmpType"])) != "structure":
-            print_node_da(index, struct_item["cmpName"], len(structure_list), go_to_next_level, False)
-        else:
-            print_node_da(item_index, struct_item["cmpName"], len(structure_list), go_to_next_level, True)
-            struct_item = struct_item["cmpType"][1]
-            print_structure(struct_item, index, len(struct_item), 2)
-
-
-def print_direct_da(da_list):
-    """
-    logger.info data attributes that are directly added to a direct Data Object (not a sub data object)
-    """
-    for da_index, da in enumerate(da_list):
-        print_node_da(da_index, da["daRef"], len(da_list), 0, True)
-        if next(iter(da["daType"])) == "structure":
-            structure_list = da["daType"][1]
-            print_structure(structure_list, da_index, len(da_list), 1)
-
-
-def extract_associate_request_type(tpaa_tuple):
-    """
-    Extracts the request type from an associate TPAA tuple.
-    Example input:
-    ("associate", ("service", ("associateRequest", {...})))
-    Returns: "associateRequest"
-    """
-    try:
-        if tpaa_tuple[0] != "associate":
-            raise ValueError("Not an 'associate' TPAA PDU")
-        return tpaa_tuple[1][1][0]
-    except (IndexError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for associateRequest") from e
-
-
-def extract_service_name(tpaa_tuple):
-    """
-    Extracts the service name from a TPAA tuple.
-    Example input:
-    ("response", { "invokeId": ..., "associateId": ..., "service": ("serviceName", {...}) })
-    """
-    try:
-        return tpaa_tuple[1]["service"][0]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for service name") from e
-
-
-def extract_invoke_id(tpaa_tuple):
-    """
-    Extracts the invoke id a TPAA tuple.
-    Example input:
-    ("response", { "invokeId": ..., "associateId": ..., "service": ("..., {...}) })
-    """
-    try:
-        return tpaa_tuple[1]["invokeId"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for service name") from e
-
-
-def extract_ld_name(tpaa_tuple):
-    """
-    Extracts the ldName from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getLogicalDeviceDirectory", {"ldName": "LD1"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["ldName"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for ldName") from e
-
-
-def extract_ln_ref(tpaa_tuple):
-    """
-    Extracts the lnName from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getLogicalNodeDirectory", {"lnRef": "LLN0"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["lnRef"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for ldName") from e
-
-
-def extract_acsiType(tpaa_tuple):
-    """
-    Extracts the acsiType from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getLogicalNodeDirectory", {"acsiType": "dataObject"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["aCSIClass"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for ldName") from e
-
-
-def extract_ds_ref(tpaa_tuple):
-    """
-    Extracts the dataset reference from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getDataSetDirectory", {"dsRef": "@Dataset1"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["dsRef"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for ldName") from e
-
-
-def get_list_of_items_ln(ln_ref, asci_service, ied: IedModel):
-    """
-    Returns the list of requested items from the logical node in getLogicalNodeDirectory
-    """
-    return_list = []
-    ld_name, ln_name = re.split(r"[/]", ln_ref)
-    foundLD: LogicalDevice = next((ld for ld in ied.logical_devices if ld.name == ld_name), None)
-    if foundLD:
-        foundLN: LogicalNode = next((ln for ln in foundLD.logical_nodes if ln.name == ln_name), None)
-        if foundLN:
-            if asci_service == "dataObject":
-                return_list = [do.name for do in foundLN.data_objects]
-            elif asci_service == "dataset":
-                return_list = [ds.name for ds in ied.data_sets]
-    return return_list
-
-
-def extract_data_ref(tpaa_tuple):
-    """
-    Extracts the dataRef from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getDataDirectory", {"dataRef": "LD0/LLN0.Mod"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["dataRef"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for dataRef") from e
-
-
-def extract_ref(tpaa_tuple):
-    """
-    Extracts the ref from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getDataValues", {"ref": "LD0/LLN0.Mod"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["ref"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for dataRef") from e
-
-
-def extract_dataAttrVal(tpaa_tuple):
-    """
-    Extracts the dataAttrVal from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("setDataValues", {"dataAttrVal": ...}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["dataAttrVal"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for dataRef") from e
-
-
-def extract_includeElementName(tpaa_tuple):
-    """
-    Extracts the includeElementName from a TPAA request tuple of getDataValues.
-    Assumes structure:
-    ("request", { ..., "service": ("getDataValues", {"includeElementName": True}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["includeElementName"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for dataRef") from e
-
-
-def extract_max_message_size(tpaa):
-    """
-    Extracts the maxMessagesize from a TPAA request tuple
-    """
-    try:
-        return tpaa[1][1][1]["maxMessageSize"]
-    except (IndexError, KeyError, TypeError):
-        raise ValueError("Invalid TPAA structure for maxMessageSize")
-
-
 def find_do_with_ref(data_ref, ied):
     """
     Finding a Data Object from IED tree using its object reference
     """
     return_do = None
     ld_name, ln_name, first_do, *seg_ref = re.split(r"[/ .]", data_ref)
-    foundLD: LogicalDevice = next((ld for ld in ied.logical_devices if ld.name == ld_name), None)
-    if foundLD:
-        foundLN: LogicalNode = next((ln for ln in foundLD.logical_nodes if ln.name == ln_name), None)
-        if foundLN:
-            foundDO = next((do for do in foundLN.data_objects if do.name == first_do), None)
+    found_ld: LogicalDevice = next(
+        (ld for ld in ied.logical_devices if ld.name == ld_name), None
+    )
+    if found_ld:
+        found_ln: LogicalNode = next(
+            (ln for ln in found_ld.logical_nodes if ln.name == ln_name), None
+        )
+        if found_ln:
+            found_do = next(
+                (do for do in found_ln.data_objects if do.name == first_do), None
+            )
             if len(seg_ref) != 0:
-                if foundDO:
-                    inner_do: DataObject = foundDO
+                if found_do:
+                    inner_do: DataObject = found_do
                     for i in range(0, len(seg_ref)):
                         inner_do = next(
-                            (do for do in inner_do.get_do_from_do_or_da_list() if do.name == seg_ref[i]), None
+                            (
+                                do
+                                for do in inner_do.get_do_from_do_or_da_list()
+                                if do.name == seg_ref[i]
+                            ),
+                            None,
                         )
                     return_do = inner_do
 
             else:
-                return_do = foundDO
+                return_do = found_do
 
     return return_do, seg_ref
 
 
-def look_in_da_or_do_list(seg_ref, foundDO):
+def look_in_da_or_do_list(seg_ref, found_do):
     """
     Find an item in a Data Object do_or_da_list
     """
-    found_obj = foundDO
+    found_obj = found_do
     for ref_index, ref_item in enumerate(seg_ref):
         if isinstance(found_obj, DataObject):
             found_item = next(
                 (
                     item
-                    for item in found_obj.get_do_from_do_or_da_list() + found_obj.get_da_from_do_or_da_list()
+                    for item in found_obj.get_do_from_do_or_da_list()
+                    + found_obj.get_da_from_do_or_da_list()
                     if item.name == ref_item
                 ),
                 None,
             )
         else:
-            found_item = next((item for item in found_obj.data_attributes if item.name == ref_item), None)
+            found_item = next(
+                (item for item in found_obj.data_attributes if item.name == ref_item),
+                None,
+            )
         if found_item is not None:
             found_obj = found_item
             if ref_index == len(seg_ref):
@@ -480,13 +233,17 @@ def look_in_da_or_do_list(seg_ref, foundDO):
 
 def find_ds_in_tree(data_ref, ied):
     """
-    Find a DataObject or DataAttribute in the IED tree
+    Find a DataSet in the IED tree
     """
-    foundDS = None
     ld_name, ln_name, ds_name = re.split(r"[/ .]", data_ref)
-
-    foundDS = next((ds for ds in ied.data_sets if ds.name == ds_name), None)
-    return foundDS
+    for ld in ied.logical_devices:
+        if ld.name != ld_name:
+            continue
+        for ln in ld.logical_nodes:
+            if ln.name != ln_name:
+                continue
+            return next((ds for ds in ln.data_sets if ds.name == ds_name), None)
+    return None
 
 
 def find_object_in_tree(data_ref, ied):
@@ -495,65 +252,47 @@ def find_object_in_tree(data_ref, ied):
     """
     return_do = None
     ld_name, ln_name, first_do, *seg_ref = re.split(r"[/ .]", data_ref)
-    foundLD: LogicalDevice = next((ld for ld in ied.logical_devices if ld.name == ld_name), None)
-    if foundLD:
-        foundLN: LogicalNode = next((ln for ln in foundLD.logical_nodes if ln.name == ln_name), None)
-        if foundLN:
-            foundDO = next((do for do in foundLN.data_objects if do.name == first_do), None)
+    found_ld: LogicalDevice = next(
+        (ld for ld in ied.logical_devices if ld.name == ld_name), None
+    )
+    if found_ld:
+        found_ln: LogicalNode = next(
+            (ln for ln in found_ld.logical_nodes if ln.name == ln_name), None
+        )
+        if found_ln:
+            found_do = next(
+                (do for do in found_ln.data_objects if do.name == first_do), None
+            )
             if len(seg_ref) != 0:
-                return_do = look_in_da_or_do_list(seg_ref, foundDO)
+                return_do = look_in_da_or_do_list(seg_ref, found_do)
 
             else:
-                return_do = foundDO
+                return_do = found_do
 
     return return_do
 
 
-def extract_brcb_ref(tpaa_tuple):
-    """
-    Extracts the brcbRef from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getBRCBValues", {"brcbRef": "rcb1"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["brcbRef"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for dataRef") from e
-
-
-def extract_urcb_ref(tpaa_tuple):
-    """
-    Extracts the urcbRef from a TPAA request tuple.
-    Assumes structure:
-    ("request", { ..., "service": ("getURCBValues", {"UrcbRef": "rcb1"}) })
-    """
-    try:
-        service = tpaa_tuple[1]["service"]
-        return service[1]["urcbRef"]
-    except (IndexError, KeyError, TypeError) as e:
-        raise ValueError("Invalid TPAA structure for dataRef") from e
-
-
-def create_subDataDefinition_list(subDo_list):
+def create_sub_data_definition_list(sub_do_list):
     """
     Create the list of sub data definition to use inside getDataDefinition Response
     """
     return_list = []
     primary_da = []
-    for sdo_item in subDo_list:
+    for sdo_item in sub_do_list:
         input_data = {
             "name": sdo_item.name,
             "cdc": sdo_item.cdc,
             "count": sdo_item.elementCount,
-            "dataAttributeDefinition": create_DataAttributeDefinition_list(sdo_item.get_da_from_do_or_da_list()),
+            "dataAttributeDefinition": create_data_attribute_definition_list(
+                sdo_item.get_da_from_do_or_da_list()
+            ),
         }
         primary_da.extend(sdo_item.get_da_from_do_or_da_list())
         return_list.append(input_data)
     return return_list, primary_da
 
 
-def create_DataAttributeDefinition_list(da_list):
+def create_data_attribute_definition_list(da_list):
     """
     Create the list of data attribute definition to use inside getDataDefinition Response
     """
@@ -563,24 +302,28 @@ def create_DataAttributeDefinition_list(da_list):
     for da_item in da_list:
         value = None
 
-        if da_item.type.name != "structure":
+        if da_item.attr_type.name != "structure":
             value = None
         else:
             value = get_structure_value_def(da_item)
 
-        input_data = {"daRef": da_item.name, "fc": da_item.fc.name, "daType": (da_item.type.name, value)}
+        input_data = {
+            "daRef": da_item.name,
+            "fc": da_item.fc.wire_name,
+            "daType": (da_item.attr_type.name, value),
+        }
         return_list.append(input_data)
     return return_list
 
 
-def get_octetString_size(mmsValue):
+def get_octet_string_size(mms_value):
     """
     Get the size of an Octet String
     """
-    if mmsValue is None:
+    if mms_value is None:
         return 0
     else:
-        return len(mmsValue)
+        return len(mms_value)
 
 
 def get_structure_value_def(da_item: DataAttribute):
@@ -591,13 +334,24 @@ def get_structure_value_def(da_item: DataAttribute):
     input_data = []
     if len(da_item.data_attributes) != 0:
         for da_interal in da_item.data_attributes:
-            if da_interal.type.name != "structure" and da_interal.type.name != "octetString":
+            if (
+                da_interal.attr_type.name != "structure"
+                and da_interal.attr_type.name != "octetString"
+            ):
                 value = None
-            elif da_interal.type.name != "structure" and da_interal.type.name == "octetString":
-                value = get_octetString_size(da_interal.mmsValue)
+            elif (
+                da_interal.attr_type.name != "structure"
+                and da_interal.attr_type.name == "octetString"
+            ):
+                value = get_octet_string_size(da_interal.mms_value)
             else:
                 value = get_structure_value_def(da_interal)
-            input_data.append({"cmpName": da_interal.name, "cmpType": (da_interal.type.name, value)})
+            input_data.append(
+                {
+                    "cmpName": da_interal.name,
+                    "cmpType": (da_interal.attr_type.name, value),
+                }
+            )
 
     return input_data
 
@@ -611,16 +365,18 @@ def get_structure_value(da_item: DataAttribute, include_element_name):
     return_obj = None
     if len(da_item.data_attributes) != 0:
         for da_interal in da_item.data_attributes:
-            if da_interal.type.name != "structure":
-                value = da_interal.mmsValue
+            if da_interal.attr_type.name != "structure":
+                value = da_interal.mms_value
             else:
                 value = get_structure_value(da_interal, include_element_name)
             if include_element_name:
-
-                return_obj = {"name": da_interal.name, "data": [(da_interal.type.name, value)]}
+                return_obj = {
+                    "name": da_interal.name,
+                    "data": [(da_interal.attr_type.name, value)],
+                }
 
             else:
-                return_obj = {"data": [(da_interal.type.name, value)]}
+                return_obj = {"data": [(da_interal.attr_type.name, value)]}
 
     return return_obj
 
@@ -634,16 +390,16 @@ def set_structure_value(da_item: DataAttribute, structured_value):
     if data[0][0] == "structure":
         set_structure_value(da_item.data_attributes[0], data[0])
     else:
-        da_item.mmsValue = data[0][1]
+        da_item.mms_value = data[0][1]
 
 
 def assign_da_item(item, value, fc):
     """
     Used to assign values to Data Attributes
     """
-    if item.fc.name == fc:
+    if item.fc.wire_name == fc:
         if value[0] != "structure":
-            item.mmsValue = value[1]
+            item.mms_value = value[1]
         else:
             set_structure_value(item.data_attributes[0], value)
 
@@ -692,11 +448,11 @@ def flatten_nested_data_attributes_with_fc(object, fc):
     if isinstance(object, DataObject):
         for sub_do in object.get_do_from_do_or_da_list():
             for attr_ in sub_do.get_da_from_do_or_da_list():
-                if attr_ not in flat_list and attr_.fc.name == fc:
+                if attr_ not in flat_list and attr_.fc.wire_name == fc:
                     logger.info(attr_.name)
                     flat_list.append(attr_)
         for attr in object.get_da_from_do_or_da_list():
-            if attr not in flat_list and attr.fc.name == fc:
+            if attr not in flat_list and attr.fc.wire_name == fc:
                 flat_list.append(attr)
 
     else:
@@ -708,66 +464,33 @@ def flatten_nested_data_attributes_with_fc(object, fc):
     return flat_list
 
 
-def build_fcd_ref(obj_ref, fc):
-    """Building a fcda definition"""
-    fcda_ref = {"ref": obj_ref, "fc": fc}
-    return fcda_ref
-
-
-def build_data_value(da: DataAttribute, type, value, include_element_name):
-    """
-    Creating the data values to use in getDataValues Response
-    """
-    if da.type == DataAttributeType.structure:
-        value = get_structure_value(da, include_element_name)
-
-    value = (type, value)
-    if include_element_name:
-        return_item = {"name": da.name, "data": value}
-    else:
-        return_item = {"data": value}
-    return return_item
-
-
-def build_data_obj_value(do: DataObject, value, include_element_name):
-    """
-    Creating the data values of structured values to use in getDataValues Response
-    """
-    if include_element_name:
-        return_item = {"name": do.name, "data": ("structure", value)}
-    else:
-        return_item = {"data": ("structure", value)}
-        return_item = ("structure", return_item)
-    return return_item
-
-
 def assign_brcb_value(server_brcb, values):
     brcb = server_brcb.rcb
     try:
         brcb.obj_ref = brcb.get_objRef()
         if "bufTm" in values:
-            brcb.bufferedTime = values["bufTm"]
+            brcb.buffered_time = values["bufTm"]
 
         if "dsRef" in values:
-            brcb.datasetName = values["dsRef"]
+            brcb.dataset_name = values["dsRef"]
 
         if "gi" in values:
             brcb.gi = values["gi"]
 
         if "intgPd" in values:
-            brcb.intPeriod = values["intgPd"]
+            brcb.int_period = values["intgPd"]
 
         if "optFlds" in values:
-            brcb.options = values["optFlds"]
+            brcb.opt_flds = values["optFlds"]
 
         if "rptEna" in values:
             server_brcb.rptEna = values["rptEna"]
 
         if "rptID" in values:
-            brcb.rptId = values["rptID"]
+            brcb.rpt_id = values["rptID"]
 
         if "trgOp" in values:
-            brcb.trgOps = values["trgOp"]
+            brcb.trg_ops = values["trgOp"]
 
         if "entryID" in values:
             server_brcb.entry_id = values["entryID"]
@@ -788,28 +511,28 @@ def assign_urcb_value(server_urcb, values):
         urcb.obj_ref = values["urcbRef"]
 
         if "bufTm" in values:
-            urcb.bufferedTime = values["bufTm"]
+            urcb.buffered_time = values["bufTm"]
 
         if "dsRef" in values:
-            urcb.datasetName = values["dsRef"]
+            urcb.dataset_name = values["dsRef"]
 
         if "gi" in values:
             urcb.gi = values["gi"]
 
         if "intgPd" in values:
-            urcb.intPeriod = values["intgPd"]
+            urcb.int_period = values["intgPd"]
 
         if "optFlds" in values:
-            urcb.options = values["optFlds"]
+            urcb.opt_flds = values["optFlds"]
 
         if "rptEna" in values:
             server_urcb.rptEna = values["rptEna"]
 
         if "rptID" in values:
-            urcb.rptId = values["rptID"]
+            urcb.rpt_id = values["rptID"]
 
         if "trgOp" in values:
-            urcb.trgOps = values["trgOp"]
+            urcb.trg_ops = values["trgOp"]
 
         if "resv" in values:
             server_urcb.resv = values["resv"]

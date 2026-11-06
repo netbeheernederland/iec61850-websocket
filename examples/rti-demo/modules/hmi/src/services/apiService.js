@@ -1,0 +1,397 @@
+/*
+ * SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Copyright 2025-2026 Netbeheer Nederland
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { DEFAULT_BFF_HOST, DEFAULT_BFF_PORT } from '../config';
+import { log } from '../utils/log';
+
+/**
+ * API Service for BFF Backend
+ * This service provides a standardized way to execute API calls through the BFF's /api/execute endpoint
+ */
+
+// API Definitions - all available endpoints that can be called through execute
+const API_DEFINITIONS = [
+  // Connection management
+  { id: 'connect', label: 'POST /api/connect', method: 'POST', path: '/api/connect' },
+  { id: 'disconnect', label: 'POST /api/disconnect', method: 'POST', path: '/api/disconnect' },
+  
+  // Model operations
+  { id: 'model-tree', label: 'POST /api/model/tree', method: 'POST', path: '/api/model/tree' },
+  { id: 'data-definition', label: 'POST /api/getDataDefinition', method: 'POST', path: '/api/getDataDefinition' },
+  
+  // Data operations
+  { id: 'read', label: 'POST /api/readvalue', method: 'POST', path: '/api/readvalue' },
+  { id: 'write', label: 'POST /api/writevalue', method: 'POST', path: '/api/writevalue' },
+  
+  // Dataset operations
+  { id: 'dataset-directory', label: 'POST /api/getDataSetDirectory', method: 'POST', path: '/api/getDataSetDirectory' },
+  
+  // Logs and actions
+  { id: 'actions-logs', label: 'GET /api/actions-logs', method: 'GET', path: '/api/actions-logs' },
+  { id: 'clear-logs', label: 'POST /api/clear-logs', method: 'POST', path: '/api/clear-logs' },
+  
+  // Status
+  { id: 'status', label: 'GET /api/status', method: 'GET', path: '/api/status' },
+  
+  // Control operations
+  { id: 'select', label: 'POST /api/select', method: 'POST', path: '/api/select' },
+  { id: 'operate', label: 'POST /api/operate', method: 'POST', path: '/api/operate' },
+  
+  // Report Control Blocks (RCB)
+  { id: 'urcb-read', label: 'POST /api/urcb-read', method: 'POST', path: '/api/urcb-read' },
+  { id: 'brcb-read', label: 'POST /api/brcb-read', method: 'POST', path: '/api/brcb-read' },
+  { id: 'brcb-write', label: 'POST /api/brcb-write', method: 'POST', path: '/api/brcb-write' },
+  { id: 'urcb-write', label: 'POST /api/urcb-write', method: 'POST', path: '/api/urcb-write' },
+  
+  // Health check
+  { id: 'health', label: 'GET /api/health', method: 'GET', path: '/api/health' },
+  
+  // ACSI Server operations
+  { id: 'start', label: 'POST /api/start', method: 'POST', path: '/api/start' },
+  { id: 'stop', label: 'POST /api/stop', method: 'POST', path: '/api/stop' },
+  { id: 'model', label: 'GET /api/model', method: 'GET', path: '/api/model' },
+  { id: 'update-iedmodel', label: 'POST /api/update-iedmodel', method: 'POST', path: '/api/update-iedmodel' },
+  
+  // OAuth configuration
+  { id: 'reconfig-oauth', label: 'POST /api/reconfig-oauth', method: 'POST', path: '/api/reconfig-oauth' },
+  { id: 'reconfig-connection', label: 'POST /api/reconfig-connection', method: 'POST', path: '/api/reconfig-connection' },
+  { id: 'oauth-status', label: 'GET /api/oauth-status', method: 'GET', path: '/api/oauth-status' },
+  { id: 'runtime-tls-config', label: 'GET /api/tls-config', method: 'GET', path: '/api/tls-config' },
+  
+  // Messages operations
+  { id: 'messages', label: 'GET /api/messages', method: 'GET', path: '/api/messages' },
+  { id: 'clear-messages', label: 'POST /api/clear-messages', method: 'POST', path: '/api/clear-messages' },
+
+  // Properties 
+  { id: 'properties', label: 'GET /api/properties', method: 'GET', path: '/api/properties' },
+
+  // Plugins (the plugin contract's management routes, modules/plugins/openapi.yaml)
+  { id: 'plugins', label: 'GET /api/plugins', method: 'GET', path: '/api/plugins' },
+  { id: 'plugin-add', label: 'POST /api/plugins', method: 'POST', path: '/api/plugins' },
+  { id: 'plugin-edit', label: 'PUT /api/plugins/{name}', method: 'PUT', path: '/api/plugins/{name}' },
+  { id: 'plugin-reload', label: 'POST /api/plugins/{name}/reload', method: 'POST', path: '/api/plugins/{name}/reload' },
+  { id: 'plugin-remove', label: 'DELETE /api/plugins/{name}', method: 'DELETE', path: '/api/plugins/{name}' },
+  // A plugin's own routes (spec 0001); the method is the caller's.
+  { id: 'plugin-route', label: '/api/plugins/{name}/{path}', method: 'GET', path: '/api/plugins/{name}/{path*}' },
+
+  // The log level while running (specs 0010, 0011): the SO's and FSPs' through
+  // /api/execute (getInstanceLogLevel); the BFF's own is getBffLogLevel.
+  { id: 'log-level', label: 'GET /api/log-level', method: 'GET', path: '/api/log-level' },
+  { id: 'log-level-set', label: 'PUT /api/log-level', method: 'PUT', path: '/api/log-level' },
+];
+
+// "/api/plugins/{name}/reload" + { name: 'dr_panel' } -> "/api/plugins/dr_panel/reload".
+// A {key*} keeps its slashes, encoding each segment: "leds/1" stays "leds/1".
+const encodeParam = (value, keepSlashes) => (keepSlashes
+  ? String(value).split('/').map(encodeURIComponent).join('/')
+  : encodeURIComponent(value));
+const fillPath = (path, pathParams) => (pathParams
+  ? path.replace(/\{(\w+)(\*?)\}/g, (match, key, star) => (key in pathParams ? encodeParam(pathParams[key], star === '*') : match))
+  : path);
+
+// "on=1&color=red" (or "?on=1...") -> "?on=1&color=red", encoded; "" -> "".
+const queryString = (query) => {
+  const text = new URLSearchParams(String(query || '').replace(/^\?/, '')).toString();
+  return text ? `?${text}` : '';
+};
+
+/**
+ * Get API definition by ID
+ * @param {string} id - The API ID
+ * @returns {object|null} The API definition object or null if not found
+ */
+export const getApiById = (id) => API_DEFINITIONS.find(api => api.id === id);
+
+/**
+ * Get BFF base URL from localStorage, else the configured default (see config.js)
+ * @returns {string} The BFF base URL
+ */
+export const getBffBaseUrl = () => {
+  let savedSettings = {};
+  try {
+    savedSettings = JSON.parse(localStorage.getItem('rti-hmi-settings') || '{}') || {};
+  } catch (e) {
+    log.warn(`Failed to parse rti-hmi-settings: ${e.message}`);
+  }
+  const host = localStorage.getItem('bffHost') || savedSettings.bffHost || DEFAULT_BFF_HOST;
+  const port = localStorage.getItem('bffPort') || savedSettings.bffPort || DEFAULT_BFF_PORT;
+  return `http://${host}:${port}`;
+};
+
+/**
+ * Get the user-configured auto-refresh interval (ms) from the Settings page,
+ * set via the "Auto Refresh Interval" field and persisted to localStorage
+ * under 'rti-hmi-refresh-settings'.
+ * @returns {number} The interval in milliseconds (default 5000)
+ */
+export const getAutoRefreshIntervalMs = () => {
+  const DEFAULT_MS = 5000;
+  try {
+    const saved = JSON.parse(localStorage.getItem('rti-hmi-refresh-settings') || '{}') || {};
+    const ms = Number(saved.autoRefreshToggle);
+    return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_MS;
+  } catch (e) {
+    return DEFAULT_MS;
+  }
+};
+
+/**
+ * Build BFF API URL
+ * @param {string} path - The API path
+ * @param {string|null} targetValue - Optional target value (host:port)
+ * @returns {string} The full API URL
+ */
+export const buildBffApiUrl = (path, targetValue = null) => {
+  const baseUrl = getBffBaseUrl();
+  if (!String(path || '').startsWith('/api/')) {
+    throw new Error(`Blocked non-BFF API path: ${path}`);
+  }
+  const url = new URL(`${baseUrl}${path}`);
+  if (targetValue) {
+    url.searchParams.set('target', targetValue);
+  }
+  return url.toString();
+};
+
+/**
+ * Execute an API call through the BFF's /api/execute endpoint
+ * This is the main function that all API calls should use
+ * 
+ * @param {string} apiId - The API ID from API_DEFINITIONS
+ * @param {string} targetValue - The target endpoint (host:port)
+ * @param {object|null} bodyOverride - Optional request body
+ * @param {object} options - Additional options
+ * @param {boolean} options.useDirect - If true, call the endpoint directly instead of through /api/execute
+ * @param {object} options.pathParams - Values for the path's {placeholders}, e.g. { name: 'dr_panel' }
+ * @param {string} options.method - Instead of the definition's method (for plugin-route)
+ * @param {string} options.query - A query string added to the path, e.g. "on=1&color=red"
+ * @returns {Promise<object|null>} The API response object with ok, status, payload, rawText
+ */
+export const executeApiCall = async (apiId, targetValue = null, bodyOverride = null, options = {}) => {
+  const { useDirect = false, pathParams = null, method = null, query = '' } = options;
+  const definition = getApiById(apiId);
+  
+  if (!definition) {
+    log.error(`API ${apiId} not found`);
+    return null;
+  }
+  const api = {
+    ...definition,
+    method: method || definition.method,
+    path: fillPath(definition.path, pathParams) + queryString(query),
+  };
+  
+  try {
+    let url;
+    if (useDirect) {
+      // Direct endpoint call (for cases where /api/execute is not available)
+      url = buildBffApiUrl(api.path, targetValue);
+    } else {
+      // Use /api/execute endpoint
+      url = buildBffApiUrl('/api/execute');
+    }
+    
+    const requestOptions = {
+      method: useDirect ? api.method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    };
+    
+    if (useDirect) {
+      // For direct calls, send body directly
+      if (api.method !== 'GET' && bodyOverride) {
+        requestOptions.body = JSON.stringify(bodyOverride);
+      }
+    } else {
+      // For /api/execute, send the execution request
+      const payload = {
+        target: targetValue,
+        method: api.method,
+        path: api.path,
+      };
+      if (bodyOverride) {
+        payload.body = bodyOverride;
+      }
+      requestOptions.body = JSON.stringify(payload);
+    }
+    
+    const response = await fetch(url, requestOptions);
+    const rawText = await response.text();
+    let parsedPayload = null;
+    
+    try {
+      parsedPayload = JSON.parse(rawText);
+    } catch (e) {
+      // Keep raw text for non-JSON responses
+      log.warn(`Failed to parse response as JSON: ${e.message}`);
+    }
+    
+    return {
+      ok: response.ok,
+      status: response.status,
+      payload: parsedPayload,
+      rawText,
+    };
+  } catch (error) {
+    log.error(`Request failed for ${api.label}:`, error.message || error);
+    return null;
+  }
+};
+
+/**
+ * Check if BFF is healthy
+ * @returns {Promise<boolean>} True if BFF is healthy
+ */
+export const ensureBffHealthy = async () => {
+  try {
+    const healthUrl = buildBffApiUrl('/api/health');
+    const response = await fetch(healthUrl, { method: 'GET' });
+    
+    if (!response.ok) {
+      throw new Error(`BFF health check failed with HTTP ${response.status}`);
+    }
+    
+    const payload = await response.json();
+    const bffStatus = payload?.bff?.status;
+    
+    if (String(bffStatus || '').toLowerCase() !== 'ok') {
+      throw new Error('BFF health check returned non-ok status');
+    }
+    
+    return true;
+  } catch (error) {
+    log.error('BFF health check failed:', error.message);
+    throw error;
+  }
+};
+
+// The reason in a failed call's answer: FastAPI's detail (a string, or a
+// list for a body it couldn't read), else the BFF's error, else the status.
+const failureReason = (res, what) => {
+  if (!res) return `${what}: no answer from the BFF`;
+  const detail = res.payload?.detail ?? res.payload?.error;
+  if (typeof detail === 'string' && detail) return detail;
+  if (detail) return JSON.stringify(detail);
+  return `${what}: HTTP ${res.status}`;
+};
+
+const logLevelAnswer = async (request, what) => {
+  const res = await request;
+  if (!res?.ok) throw new Error(failureReason(res, what));
+  return res.payload;
+};
+
+/**
+ * The BFF's log level (spec 0010): GET /api/log-level on the BFF itself.
+ * @param {string} [baseUrl] - The BFF to ask, e.g. the address the Settings
+ *   page just checked; the saved one when left out
+ * @returns {Promise<object>} {level, value, source, changed_at, start}
+ * @throws {Error} with the reason, when the BFF can't be reached or refuses
+ */
+export const getBffLogLevel = async (baseUrl = getBffBaseUrl()) => {
+  const what = 'Reading the BFF log level';
+  return logLevelAnswer(
+    fetch(`${baseUrl}/api/log-level`)
+      .then(async (r) => ({ ok: r.ok, status: r.status, payload: await r.json().catch(() => null) }))
+      .catch(() => null),
+    what,
+  );
+};
+
+/**
+ * Set the BFF's log level (spec 0010): PUT /api/log-level.
+ * @param {string|null} level - A name, or null for the level it started with
+ * @param {string} [baseUrl] - As for getBffLogLevel
+ * @returns {Promise<object>} The level now in use, as getBffLogLevel
+ */
+export const setBffLogLevel = async (level, baseUrl = getBffBaseUrl()) => {
+  const what = 'Setting the BFF log level';
+  return logLevelAnswer(
+    fetch(`${baseUrl}/api/log-level`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level }),
+    })
+      .then(async (r) => ({ ok: r.ok, status: r.status, payload: await r.json().catch(() => null) }))
+      .catch(() => null),
+    what,
+  );
+};
+
+/**
+ * An SO's or FSP's log level (spec 0011), through /api/execute.
+ * @param {string} target - The instance (host:port)
+ * @returns {Promise<object>} {level, value, source, changed_at, start}
+ * @throws {Error} with the instance's reason
+ */
+export const getInstanceLogLevel = async (target) => {
+  const answer = await logLevelAnswer(executeApiCall('log-level', target), 'Reading the log level');
+  return answer.result;
+};
+
+/**
+ * Set an SO's or FSP's log level (spec 0011), through /api/execute.
+ * @param {string} target - The instance (host:port)
+ * @param {string|null} level - A name, or null for the level it started with
+ * @returns {Promise<object>} The level now in use, as getInstanceLogLevel
+ */
+export const setInstanceLogLevel = async (target, level) => {
+  const answer = await logLevelAnswer(executeApiCall('log-level-set', target, { level }), 'Setting the log level');
+  return answer.result;
+};
+
+/**
+ * Build target value string from host and port
+ * @param {string} host - The host
+ * @param {number} port - The port
+ * @returns {string} The target value (host:port)
+ */
+export const buildTargetValue = (host, port) => {
+  if (!host || port === undefined || port === null) {
+    return '';
+  }
+  return `${host}:${port}`;
+};
+
+/**
+ * Get default target from endpoint object
+ * @param {object} endpoint - The endpoint object with host and port properties
+ * @returns {string} The target value (host:port)
+ */
+export const getDefaultTargetFromEndpoint = (endpoint) => {
+  if (!endpoint) {
+    return '';
+  }
+  return buildTargetValue(endpoint.host, endpoint.port);
+};
+
+export default {
+  getApiById,
+  getBffBaseUrl,
+  getAutoRefreshIntervalMs,
+  buildBffApiUrl,
+  executeApiCall,
+  ensureBffHealthy,
+  getBffLogLevel,
+  setBffLogLevel,
+  getInstanceLogLevel,
+  setInstanceLogLevel,
+  buildTargetValue,
+  getDefaultTargetFromEndpoint,
+  API_DEFINITIONS,
+};

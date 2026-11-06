@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,4 +17,8 @@
 import os
 from pathlib import Path
 
-CERT_DIR = Path(os.environ.get("CERT_DIR", Path(__file__).resolve().parents[2] / "testing" / "certs"))
+CERT_DIR = Path(
+    os.environ.get(
+        "CERT_DIR", Path(__file__).resolve().parents[2] / "testing" / "certs"
+    )
+)

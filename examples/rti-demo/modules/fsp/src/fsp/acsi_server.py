@@ -1,0 +1,1168 @@
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2025-2026 Netbeheer Nederland
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Core IEC 61850 WebSocket server module with ACSI operations.
+
+This module handles:
+- WebSocket endpoint lifecycle management
+- IEC 61850 server instantiation and control
+- Model loading and caching
+- Async event loop management
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import threading
+import time
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from ws61850.endpoint import ActiveEndpoint
+from ws61850.iec61850.data_model.ied_model import DataAttribute, IedModel
+from ws61850.iec61850.server.control_handling import (
+    ControlHandlerResult,
+    ControlServiceStatusKind,
+)
+from ws61850.iec61850.server.iec61850_server import IEC61850Server
+from ws61850.iec61850.server.service_error import ServiceStatusKind
+
+# Kinds an actions-log entry can have (`_log_action(kind=...)`). WebSocket
+# frames live in the separate messages log as kind "websocket". See
+# docs/rti-demo/design/logging-kinds.md.
+ACTION_KINDS = ("system", "acsi")
+
+
+# The states in which the ACSI server runs: without and with the SO.
+RUNNING = ("ready", "listening")
+
+
+class ACSIServerRuntime:
+    """Manages IEC 61850 WebSocket server runtime state and lifecycle."""
+
+    def __init__(self):
+        self.endpoint = None
+        self.server = None
+        self.status: str = (
+            "stopped"  # stopped|starting|ready|listening|stopping|error|reloading
+        )
+        # ready: the ACSI server runs (model, reports, writes) without a
+        # connection to the SO; listening: it also dials out to the SO.
+        self.host: str = "localhost"
+        self.port: int = 8765
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.thread: threading.Thread | None = None
+        self.tasks: dict[str, asyncio.Task] = {}
+        self.error: str | None = None
+        self.actions: deque = deque(maxlen=200)
+        self.messages: deque = deque(maxlen=500)
+        self.action_seq: int = 0
+        self.message_seq: int = 0
+        self.ied_model: IedModel | None = None
+        self.model_ied_name: str | None = None
+        self.model_source: str | None = None
+        self.cp: str = os.getenv("CP", "cp1")
+        # OAuth for the dial-out, from /start (the BFF adds the connection's
+        # stored config): the token is fetched before connecting. None: no
+        # OAuth, or whatever /reconfig-oauth set up.
+        self.start_oauth: dict | None = None
+        self.last_status_log_signature: tuple | None = None
+        self.lock: threading.Lock = threading.Lock()
+        self.model_lock: threading.Lock = (
+            threading.Lock()
+        )  # Separate lock for model operations
+
+        # Dynamic model reloading state
+        self.model_version: int = 0  # Incremented on each model update
+        self.pending_model: IedModel | None = None  # New model waiting to be applied
+        self.model_reload_in_progress: bool = False
+        self.old_server_cp: IEC61850Server | None = None  # For cleanup after hot-swap
+
+        # Callbacks for message logging
+        self.recv_msg_callback: Callable | None = None
+        self.send_msg_callback: Callable | None = None
+
+        # Service-specific callbacks
+        self.write_callback: Callable | None = None
+        self.connected_callback: Callable | None = None
+        self.operate_received_callback: Callable | None = None
+        self.operate_response_callback: Callable | None = None
+
+
+class ACSIServer:
+    """IEC 61850 WebSocket server controller."""
+
+    def __init__(self, model_path):
+        self.control_hook: Callable | None = None
+        self.runtime = ACSIServerRuntime()
+        self.runtime.ied_model = None
+        self.runtime.model_ied_name = None
+        self.runtime.model_source = None
+        self.runtime.model_version = 0
+
+        self.runtime.endpoint = ActiveEndpoint()
+        self.runtime.endpoint.recv_msg_callback = self._on_recv_message
+        self.runtime.endpoint.send_msg_callback = self._on_send_message
+        self.runtime.endpoint.error_callback = self._on_connect_error
+        # Throttling for _on_connect_error: the reconnect loop retries every
+        # few seconds forever while the peer is unreachable/mismatched
+        # (e.g. a TLS on/off mismatch) - logging every single attempt would
+        # flood the 200-entry action-log deque within minutes. Log once
+        # immediately, then only again if the reason changes or enough time
+        # has passed, so "still failing, same reason" stays visible without
+        # burying everything else.
+        self._last_connect_error_message: str | None = None
+        self._last_connect_error_log_time: float = 0.0
+
+        self._log_action(
+            f"New ACSIServer instance: model_path={model_path}, id={id(self.runtime)}",
+            "debug",
+            kind="system",
+        )
+        # Prefer the model already in runtime (freshly loaded from SCL/model.py)
+        # Only reload from file as fallback if runtime model is missing
+        self.model_file = Path(model_path)
+        # If model_path is a directory, append model.py
+        if self.model_file.is_dir():
+            self.model_file = self.model_file / "model.py"
+        factory_dir = str(self.model_file.parent)
+
+        # Ensure `import model` resolves to the expected fsp/model.py directory.
+        if factory_dir not in sys.path:
+            sys.path.insert(0, factory_dir)
+
+        if not self.model_file.exists():
+            raise FileNotFoundError(
+                f"Model file not found: {self.model_file}. "
+                "Create model.py in the fsp directory before starting the server."
+            )
+
+        if self.runtime.ied_model is None:
+            try:
+                self._log_action(
+                    "No model in runtime, loading from file...", "debug", kind="system"
+                )
+                self.runtime.ied_model = self.load_current_runtime_model()
+            except FileNotFoundError:
+                # Precedes a raised RuntimeError below - a real failure, not
+                # routine tracing.
+                self._log_action("Model file not found", "warn", kind="system")
+                raise RuntimeError("No model loaded. Create fsp/model.py first.")
+        else:
+            self._log_action(
+                f"Using model from runtime: "
+                f"ied_model.name={self.runtime.ied_model.name!r} "
+                f"model_ied_name={self.runtime.model_ied_name!r}",
+                "debug",
+                kind="system",
+            )
+
+        if self.runtime.ied_model is None:
+            raise RuntimeError("No model loaded. Create fsp/model.py first.")
+
+        self._set_runtime_state(
+            model_source=str(self.model_file),
+            model_ied_name=self.runtime.ied_model.name,
+        )
+
+        iec61850_instance = IEC61850Server(self.runtime.ied_model, self.runtime.cp)
+        iec61850_instance.set_control_handler(self.handle_control, None)
+        iec61850_instance.send_msg_callback = self.runtime.endpoint.send_msg_callback
+        iec61850_instance.recv_msg_callback = self.runtime.endpoint.recv_msg_callback
+        self.runtime.server = iec61850_instance
+        self.runtime.endpoint.add_iec61850_server(self.runtime.server)
+
+    def handle_control(self, obj_ref, ctl_val_value, parameter):
+        """Answer an Operate: the plugin that owns `obj_ref` decides, if one
+        does (decision 0021); otherwise ctlVal only has to have its type."""
+        if self.control_hook is not None:
+            answer = self.control_hook(obj_ref, ctl_val_value)
+            if answer is not None:
+                if answer.ok:
+                    return ControlHandlerResult.OK, None
+                cause = ControlServiceStatusKind.__members__.get(
+                    answer.add_cause or "", ControlServiceStatusKind.unknown
+                )
+                return ControlHandlerResult.FAILED, cause
+
+        ctl_val = ctl_val_value["value"]
+
+        type_map = {
+            "boolean": bool,
+            "int32": int,
+            "float32": float,
+            "string": str,
+        }
+        if ctl_val_value is not None:
+            if ctl_val[0] in type_map:
+                if isinstance(ctl_val[1], type_map[ctl_val[0]]):
+                    return ControlHandlerResult.OK, None
+                else:
+                    return (
+                        ControlHandlerResult.FAILED,
+                        ControlServiceStatusKind.invalidPosition,
+                    )
+        else:
+            return None, ServiceStatusKind.instanceNotAvailable
+        return None, None
+
+    def install_control_hook(self, hook):
+        """Install a hook asked first for every Operate.
+
+        The hook receives (objRef, ctlVal) and returns a ControlResult, or
+        None to leave the Operate to the default check.
+        """
+        self.control_hook = hook
+
+    def install_write_callback(self, callback):
+        """Install a callback to be invoked when write messages are received."""
+        self.runtime.write_callback = callback
+
+    def install_connected_callback(self, callback):
+        """Install a callback to be invoked when associateResponse messages are received.
+
+        The callback receives: associateResponse data (dict)
+        """
+        self.runtime.connected_callback = callback
+
+    def install_operate_received_callback(self, callback):
+        """Install a callback to be invoked when operate request messages are received.
+
+        The callback receives: operate request data (dict)
+        """
+        self.runtime.operate_received_callback = callback
+
+    def install_operate_response_callback(self, callback):
+        """Install a callback to be invoked when operate response messages are sent.
+
+        The callback receives: operate response data (dict)
+        """
+        self.runtime.operate_response_callback = callback
+
+    def load_current_runtime_model(self) -> IedModel:
+        """Load the current runtime model from model.py."""
+        if not self.model_file.exists():
+            raise FileNotFoundError(f"Model file not found: {self.model_file}")
+
+        # Use importlib.util to load without polluting sys.modules
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            self.model_file.stem, self.model_file
+        )
+        model_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(model_module)
+
+        ied = getattr(model_module, "ied", None)
+        if ied is None and hasattr(model_module, "build_ied_model"):
+            ied = model_module.build_ied_model()
+        if ied is None:
+            raise RuntimeError(
+                f"{self.model_file.stem}.py does not define 'ied' or build_ied_model()"
+            )
+        if not isinstance(ied, IedModel):
+            raise RuntimeError(f"Model in {self.model_file.stem}.py is not an IedModel")
+        return ied
+
+    def update_model_file(
+        self, model_source: str, apply_dynamically: bool = True
+    ) -> IedModel:
+        """Update model.py and reload runtime model. Reverts on validation failure.
+
+        Args:
+            model_source: Complete Python code for model.py
+            apply_dynamically: If True and server is running, apply model hot-swap.
+                            If False, only update the model file and runtime state.
+
+        Returns:
+            IedModel: The newly loaded model
+
+        Raises:
+            ValueError: If model_source is invalid
+            Exception: If model validation fails
+        """
+        if not isinstance(model_source, str) or not model_source.strip():
+            raise ValueError("modelPy must be a non-empty string")
+
+        previous_content = (
+            self.model_file.read_text(encoding="utf-8")
+            if self.model_file.exists()
+            else None
+        )
+        self.model_file.write_text(model_source, encoding="utf-8")
+
+        try:
+            ied_model = self.load_current_runtime_model()
+        except Exception:
+            if previous_content is not None:
+                self.model_file.write_text(previous_content, encoding="utf-8")
+            raise
+
+        # Increment model version and set as pending
+        # Note: runtime.ied_model is NOT updated here - it will be updated
+        # after hot-swap completes to avoid race conditions
+        with self.runtime.model_lock:
+            self.runtime.model_version += 1
+            self.runtime.pending_model = ied_model
+            self.runtime.model_source = str(self.model_file)
+            self.runtime.model_ied_name = ied_model.name
+
+        # If server is running and dynamic application is requested, trigger hot-swap
+        if apply_dynamically and self.runtime.status in RUNNING:
+            self._apply_model_hot_swap()
+        else:
+            # Server not running - just update runtime model reference directly
+            # No hot-swap needed, model will be loaded when server starts
+            with self.runtime.model_lock:
+                self.runtime.ied_model = ied_model
+
+        return ied_model
+
+    def _apply_model_hot_swap(self) -> bool:
+        """Apply pending model to running server via hot-swap.
+
+        This method updates the existing IEC61850Server instance with the new model
+        by calling update_ied_model(), preserving WebSocket connections.
+
+        Returns:
+            bool: True if hot-swap was successful, False otherwise
+        """
+        with self.runtime.model_lock:
+            running_status = self.runtime.status
+            if running_status not in RUNNING:
+                self._log_action(
+                    "Hot-swap aborted: server not running",
+                    "warn",
+                    kind="system",
+                )
+                return False
+
+            if self.runtime.model_reload_in_progress:
+                self._log_action(
+                    "Hot-swap aborted: reload already in progress",
+                    "warn",
+                    kind="system",
+                )
+                return False
+
+            if self.runtime.pending_model is None:
+                self._log_action(
+                    "Hot-swap aborted: no pending model", "warn", kind="system"
+                )
+                return False
+
+            self.runtime.model_reload_in_progress = True
+            pending_model = self.runtime.pending_model
+            old_server = self.runtime.server
+
+            # Set reload status
+            self._set_runtime_state(status="reloading")
+
+        try:
+            # Execute hot-swap on the event loop
+            loop = self.runtime.loop
+            if loop is None or not loop.is_running():
+                raise RuntimeError("Event loop not available for hot-swap")
+
+            # Use run_coroutine_threadsafe to execute on the server's event loop
+            future = asyncio.run_coroutine_threadsafe(
+                self._perform_hot_swap_async(pending_model, old_server), loop
+            )
+            result = future.result(timeout=30)
+
+            with self.runtime.model_lock:
+                self.runtime.model_reload_in_progress = False
+                if result:
+                    self.runtime.pending_model = None
+                    self._set_runtime_state(status=running_status)
+                    self._log_action(
+                        "Model hot-swap completed successfully",
+                        detail={
+                            "ied": pending_model.name,
+                            "version": self.runtime.model_version,
+                        },
+                        kind="system",
+                    )
+                else:
+                    self._set_runtime_state(status=running_status)
+                    self._log_action(
+                        "Model hot-swap completed with warnings", "warn", kind="system"
+                    )
+
+            return result
+
+        except Exception as exc:
+            with self.runtime.model_lock:
+                self.runtime.model_reload_in_progress = False
+                self._set_runtime_state(status=running_status)
+            self._log_action(f"Model hot-swap failed: {exc}", "error", kind="system")
+            # No server restoration needed - we updated in-place
+            # The old server instance is still valid with its original model
+            return False
+
+    def _log_action(
+        self,
+        message: str,
+        level: str = "info",
+        detail: dict[str, Any] | None = None,
+        *,
+        kind: str,
+        cp: str = "",
+        service: str = "",
+        correlation: dict[str, Any] | None = None,
+    ) -> None:
+        """Log an action to the runtime actions deque.
+
+        `kind` is required and must be "system" (instance lifecycle and
+        configuration) or "acsi" (one ACSI service call) - see
+        docs/rti-demo/design/logging-kinds.md. WebSocket frames go to the
+        separate messages log (`_log_message`) as kind "websocket".
+        `correlation` ({"cp", "invokeId", "messageSeqFrom"}) links an acsi
+        entry to the frames it produced.
+        """
+        if kind not in ACTION_KINDS:
+            raise ValueError(
+                f"_log_action kind must be one of {ACTION_KINDS}, got {kind!r}"
+            )
+        if detail is None:
+            detail = {}
+        with self.runtime.lock:
+            self.runtime.action_seq += 1
+            entry = {
+                "id": self.runtime.action_seq,
+                "time": time.strftime("%H:%M:%S"),
+                "kind": kind,
+                "level": level,
+                "message": message,
+                "detail": detail,
+                "cp": cp,
+                "service": service,
+            }
+            if correlation:
+                entry["correlation"] = correlation
+            self.runtime.actions.append(entry)
+
+    def _on_connect_error(self, cp: str, message: str | None) -> None:
+        """ActiveEndpoint.error_callback: dial-out attempt failed, or succeeded.
+
+        Previously a failure only ever reached the raw ws61850.endpoint
+        logger (container stdout) - never the action log, never
+        runtime.error/get_status()'s "error" field - so a persistently
+        failing connection (e.g. TLS enabled on the peer but not here, or
+        vice versa) retried forever with zero visibility in the BFF/HMI,
+        only discoverable by reading raw container logs.
+
+        message is None when a connection was just established - if a prior
+        failure had been recorded, clear it so runtime.error doesn't keep
+        reporting a stale failure after the connection has recovered.
+        """
+        if message is None:
+            if self.runtime.error is not None:
+                self.runtime.error = None
+                self._log_action(
+                    f"Connection re-established (cp={cp})", "info", kind="system"
+                )
+            self._last_connect_error_message = None
+            self._last_connect_error_log_time = 0.0
+            return
+
+        self.runtime.error = message
+
+        now = time.monotonic()
+        changed = message != self._last_connect_error_message
+        stale = now - self._last_connect_error_log_time >= 60.0
+        if changed or stale:
+            self._log_action(
+                f"Connection attempt failed (cp={cp}): {message}", "warn", kind="system"
+            )
+            self._last_connect_error_message = message
+            self._last_connect_error_log_time = now
+
+    def _extract_message_meta(self, raw: str) -> dict[str, str]:
+        """Extract metadata from a message (service type, category)."""
+        service_type = "unknown"
+        category = "unknown"
+        cp = ""
+        invoke_id = None
+        try:
+            msg = json.loads(raw)
+            if not isinstance(msg, dict):
+                return {
+                    "service_type": service_type,
+                    "category": category,
+                    "cp": cp,
+                    "invoke_id": invoke_id,
+                }
+
+            if "request" in msg:
+                category = "request"
+                service = msg.get("request", {}).get("service", {})
+                cp = msg["request"].get("associateId", "")
+                invoke_id = msg["request"].get("invokeId")
+                if isinstance(service, dict) and service:
+                    service_type = next(iter(service.keys()))
+            elif "response" in msg:
+                category = "response"
+                service = msg.get("response", {}).get("service", {})
+                cp = msg["response"].get("associateId", "")
+                invoke_id = msg["response"].get("invokeId")
+                if isinstance(service, dict) and service:
+                    service_type = next(iter(service.keys()))
+            elif "associate" in msg:
+                category = "associate"
+                service = msg.get("associate", {}).get("service", {})
+                if isinstance(service, dict) and service:
+                    service_type = next(iter(service.keys()))
+            elif "unconfirmed" in msg:
+                # A report - its associateId is the cp it goes out on.
+                category = "unconfirmed"
+                service = msg.get("unconfirmed", {}).get("service", {})
+                cp = msg["unconfirmed"].get("associateId", "")
+                if isinstance(service, dict) and service:
+                    service_type = next(iter(service.keys()))
+        except Exception:
+            service_type = "parse-error"
+            category = "parse-error"
+
+        return {
+            "service_type": service_type,
+            "category": category,
+            "cp": cp,
+            "invoke_id": invoke_id,
+        }
+
+    def _on_send_message(self, message: Any, timestamp: Any) -> None:
+        """Callback for sent WebSocket messages."""
+        # Check for associateResponse and operate response in sent messages
+        msg_dict = message
+        if isinstance(message, bytes):
+            try:
+                msg_dict = json.loads(message.decode("utf-8", errors="replace"))
+            except (json.JSONDecodeError, AttributeError):
+                msg_dict = {}
+        elif isinstance(message, str):
+            try:
+                msg_dict = json.loads(message)
+            except (json.JSONDecodeError, AttributeError):
+                msg_dict = {}
+
+        if isinstance(msg_dict, dict):
+            # Check for associateResponse in sent messages
+            service_data = msg_dict.get("associate", {}).get("service", {})
+
+            if isinstance(service_data, dict):
+                service_name = next(iter(service_data.keys())) if service_data else None
+                if service_name == "associateResponse":
+                    associate_response = service_data.get("associateResponse", {})
+                    if self.runtime.connected_callback is not None:
+                        self.runtime.connected_callback(associate_response)
+
+            # Check for operate response in sent messages
+            response_service_data = msg_dict.get("response", {}).get("service", {})
+            if (
+                isinstance(response_service_data, dict)
+                and "operate" in response_service_data
+            ):
+                operate_response = response_service_data.get("operate", {})
+                if self.runtime.operate_response_callback is not None:
+                    self.runtime.operate_response_callback(operate_response)
+
+        self._log_message("send", message, timestamp)
+
+    def _on_recv_message(self, msg, ts):
+        """Callback for received WebSocket messages."""
+        # Check for operate requests in received messages
+        msg_dict = msg
+        if isinstance(msg, bytes):
+            try:
+                msg_dict = json.loads(msg.decode("utf-8", errors="replace"))
+            except (json.JSONDecodeError, AttributeError):
+                msg_dict = {}
+        elif isinstance(msg, str):
+            try:
+                msg_dict = json.loads(msg)
+            except (json.JSONDecodeError, AttributeError):
+                msg_dict = {}
+
+        if isinstance(msg_dict, dict):
+            # Check for operate request
+            service_data = msg_dict.get("request", {}).get("service", {})
+            if isinstance(service_data, dict) and "operate" in service_data:
+                operate_data = service_data.get("operate", {})
+                if self.runtime.operate_received_callback is not None:
+                    self.runtime.operate_received_callback(operate_data)
+
+        self._log_message("recv", msg, ts)
+
+    def _log_message(self, direction: str, message: Any, timestamp: Any) -> None:
+        """Log a message (request/response) to the runtime messages deque."""
+        if isinstance(message, bytes):
+            text = message.decode("utf-8", errors="replace")
+        else:
+            text = str(message)
+
+        if isinstance(timestamp, datetime):
+            ts = timestamp.strftime("%H:%M:%S.%f")[:-3]
+        else:
+            ts = time.strftime("%H:%M:%S")
+
+        meta = self._extract_message_meta(text)
+        with self.runtime.lock:
+            self.runtime.message_seq += 1
+            self.runtime.messages.append(
+                {
+                    "id": self.runtime.message_seq,
+                    "time": ts,
+                    "timestamp": ts,
+                    "kind": "websocket",
+                    "level": "error"
+                    if meta["service_type"] == "serviceError"
+                    else "info",
+                    "direction": direction,
+                    "service": meta["service_type"],
+                    "service_type": meta["service_type"],
+                    "category": meta["category"],
+                    "message": text,
+                    "preview": text[:220] + ("..." if len(text) > 220 else ""),
+                    "cp": meta["cp"],
+                    "invokeId": meta["invoke_id"],
+                }
+            )
+
+    async def _perform_hot_swap_async(
+        self, new_model: IedModel, old_server: IEC61850Server | None
+    ) -> bool:
+        """Perform the actual hot-swap operation on the event loop.
+
+        This coroutine updates the existing IEC61850Server instance with the new model
+        by calling update_ied_model(), preserving WebSocket connections.
+
+        Args:
+            new_model: The new IedModel to use
+            old_server: The current IEC61850Server instance to update
+
+        Returns:
+            bool: True if swap was successful
+        """
+        try:
+            endpoint = self.runtime.endpoint
+            if endpoint is None:
+                self._log_action(
+                    "Hot-swap failed: endpoint is None", "error", kind="system"
+                )
+                return False
+
+            cp = self.runtime.cp or "cp1"
+
+            # Update the existing server in-place with new model
+            if old_server is not None:
+                # Call the new update_ied_model method to refresh services
+                old_server.update_ied_model(new_model)
+
+                # Cancel periodic reporting from old server (will be restarted below)
+                try:
+                    for task_name, task in list(self.runtime.tasks.items()):
+                        if (
+                            task_name.startswith(f"{cp}-periodic-report")
+                            and not task.done()
+                        ):
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+                except Exception as cancel_exc:
+                    self._log_action(
+                        f"Warning: Failed to cancel old tasks: {cancel_exc}",
+                        "warn",
+                        kind="system",
+                    )
+
+                # Update runtime state references (server instance stays the same)
+                # Use lock to ensure atomic update
+                with self.runtime.model_lock:
+                    self.runtime.ied_model = new_model
+                    self.runtime.model_ied_name = new_model.name
+
+                # Restart periodic reporting with updated server
+                report_task = asyncio.create_task(
+                    old_server.periodic_report_start(), name=f"{cp}-periodic-report"
+                )
+                self.runtime.tasks["report"] = report_task
+
+                self._log_action(
+                    "Server services updated with new model",
+                    detail={"server": str(old_server), "model": new_model.name},
+                    kind="system",
+                )
+            else:
+                # No existing server, this shouldn't happen but handle it
+                self._log_action(
+                    "Hot-swap failed: no existing server to update",
+                    "error",
+                    kind="system",
+                )
+                return False
+
+            return True
+
+        except Exception as exc:
+            self._log_action(
+                f"Hot-swap async execution failed: {exc}", "error", kind="system"
+            )
+            return False
+
+    def _set_runtime_state(self, **kwargs: Any) -> None:
+        """Atomically update runtime state."""
+        with self.runtime.lock:
+            for key, value in kwargs.items():
+                setattr(self.runtime, key, value)
+
+    def _validate_port(self, port: int) -> None:
+        """Validate port number."""
+        if port < 1 or port > 65535:
+            raise ValueError("Port must be in range 1..65535")
+
+        # On POSIX systems, binding to ports < 1024 requires elevated privileges.
+        if os.name != "nt" and port < 1024:
+            raise PermissionError(
+                f"Port {port} is privileged on this runtime. Use a port >= 1024 or run with elevated privileges."
+            )
+
+    async def _stop_server_async(self) -> None:
+        """Stop the server asynchronously."""
+        endpoint = self.runtime.endpoint
+        tasks = self.runtime.tasks or {}
+
+        self._log_action("Stopping server tasks...", kind="system")
+
+        for task in tasks.values():
+            if task and not task.done():
+                task.cancel()
+
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+        # Cleanup old server instance from hot-swap
+        if self.runtime.old_server_cp is not None:
+            try:
+                # The old server should be cleaned up, but we don't need to explicitly stop it
+                # as it's been replaced in the endpoint
+                self.runtime.old_server_cp = None
+            except Exception as exc:
+                self._log_action(
+                    f"Cleanup old server error: {exc}", "warn", kind="system"
+                )
+
+        if endpoint is not None:
+            try:
+                await endpoint.stop_passive()
+            except Exception as exc:
+                self._log_action(f"stop_passive error: {exc}", "warn", kind="system")
+
+        # Reset model reloading state
+        with self.runtime.model_lock:
+            self.runtime.pending_model = None
+            self.runtime.model_reload_in_progress = False
+            self.runtime.old_server_cp = None
+
+        self._set_runtime_state(
+            tasks={},
+            status="stopped",
+            error=None,
+        )
+
+        self._log_action("Server stopped", kind="system")
+        asyncio.get_running_loop().call_soon(asyncio.get_running_loop().stop)
+
+    async def _start_dial_out(self, host: str, port: int, cp: str):
+        """Start connecting to the SO; returns the connect task.
+
+        With OAuth from /start, the token is fetched first (reconfigure_oauth
+        then connects with it) - a dial-out without a token would only be
+        refused by the SO.
+        """
+        oauth = self.runtime.start_oauth
+        if oauth:
+            await self.runtime.endpoint.reconfigure_oauth(
+                host, str(port), cp, True, **oauth
+            )
+            return self.runtime.endpoint._connect_task
+        return self.runtime.endpoint.run_in_background(host, port, cp)
+
+    async def _start_server_async(self, host: str | None, port: int | None) -> None:
+        """Start the server asynchronously; without a host, don't dial out."""
+
+        cp = self.runtime.cp or "cp1"
+
+        if (
+            self.runtime.server is not None
+            and self.runtime.ied_model is not None
+            and getattr(self.runtime.server, "ied_model", None)
+            is not self.runtime.ied_model
+        ):
+            self.runtime.server.update_ied_model(self.runtime.ied_model)
+            self._log_action(
+                "Applied pending model before start (was updated while stopped)",
+                detail={"ied": self.runtime.ied_model.name},
+                kind="system",
+            )
+
+        self.runtime.server.ready_event = asyncio.Event()
+
+        report_task = asyncio.create_task(
+            self.runtime.server.periodic_report_start(), name=f"{cp}-periodic-report"
+        )
+        tasks: dict[str, asyncio.Task] = {"report": report_task}
+
+        if host is not None:
+            tasks["ws"] = await self._start_dial_out(host, port, cp)
+
+        self._set_runtime_state(
+            endpoint=self.runtime.endpoint,
+            server_cp=self.runtime.server,
+            tasks=tasks,
+            error=None,
+        )
+
+        # Give the event loop one cycle so the ws_task can actually bind the port
+        # before we declare the server "listening".
+        await asyncio.sleep(0)
+
+        if self.runtime.status != "stopping" and host is None:
+            self._set_runtime_state(status="ready")
+            self._log_action(
+                "Server ready, not connected to the SO",
+                detail={"cps": [cp]},
+                kind="system",
+            )
+        elif self.runtime.status != "stopping":
+            self._set_runtime_state(status="listening")
+            self._log_action(
+                "Server listening",
+                detail={"host": host, "port": port, "cps": [cp]},
+                kind="system",
+            )
+
+        try:
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for (name, task), result in zip(tasks.items(), results):
+                if isinstance(result, Exception) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    self._log_action(
+                        f"Task '{name}' failed: {result}", "error", kind="system"
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self._set_runtime_state(status="error", error=str(exc))
+            self._log_action(f"Server runtime error: {exc}", "error", kind="system")
+            raise
+
+    def _event_loop_thread(self, host: str | None, port: int | None) -> None:
+        """Run the event loop in a separate thread."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._set_runtime_state(loop=loop)
+
+        startup_task = loop.create_task(
+            self._start_server_async(host, port), name="server-startup"
+        )
+
+        def _on_startup_done(task: asyncio.Task) -> None:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                self._set_runtime_state(status="error", error=str(exc))
+                self._log_action(f"Startup failed: {exc}", "error", kind="system")
+                loop.call_soon_threadsafe(loop.stop)
+
+        startup_task.add_done_callback(_on_startup_done)
+
+        try:
+            loop.run_forever()
+        finally:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.close()
+            self._set_runtime_state(loop=None, thread=None)
+
+    def start_server(self, host: str | None = None, port: int | None = None) -> None:
+        """Start the server in a background thread.
+
+        With a host and port it dials out to the SO there; without, it is
+        "ready": serving its model to no one until connect().
+        """
+        if host is not None:
+            self._validate_port(port)
+
+        with self.runtime.lock:
+            status = self.runtime.status
+            if status in ("starting", *RUNNING):
+                raise RuntimeError("Server is already running")
+            self.runtime.status = "starting"
+            if host is not None:
+                self.runtime.host = host
+                self.runtime.port = port
+            self.runtime.error = None
+
+        t = threading.Thread(
+            target=self._event_loop_thread, args=(host, port), daemon=True
+        )
+        self._set_runtime_state(thread=t)
+        t.start()
+        self._log_action(
+            "Server startup initiated",
+            detail={"host": host, "port": port},
+            kind="system",
+        )
+
+    def connect(self, host: str, port: int) -> None:
+        """Dial out to the SO: start the server first if it is stopped."""
+        if self.runtime.status != "ready":
+            self.start_server(host, port)
+            return
+        self._validate_port(port)
+        self.invoke_on_runtime_loop(self._connect_async(host, port))
+
+    async def _connect_async(self, host: str, port: int) -> None:
+        """Dial out from a ready server, on its loop."""
+        cp = self.runtime.cp or "cp1"
+        ws_task = await self._start_dial_out(host, port, cp)
+        ws_task.add_done_callback(self._log_failed_dial_out)
+        self.runtime.tasks["ws"] = ws_task
+        self._set_runtime_state(host=host, port=port, status="listening")
+        self._log_action(
+            "Server listening",
+            detail={"host": host, "port": port, "cps": [cp]},
+            kind="system",
+        )
+
+    def disconnect(self) -> None:
+        """Drop the connection to the SO; the server stays ready."""
+        if self.runtime.status != "listening":
+            return
+        self.invoke_on_runtime_loop(self._disconnect_async())
+
+    async def _disconnect_async(self) -> None:
+        """Stop dialing out, on the server's loop; reports and writes go on."""
+        endpoint = self.runtime.endpoint
+        await endpoint._cancel_task(self.runtime.tasks.pop("ws", None))
+        # With OAuth the connect task is the endpoint's own, not tasks["ws"].
+        await endpoint._cancel_task(endpoint._connect_task)
+        endpoint._connect_task = None
+        self._set_runtime_state(status="ready", error=None)
+        self._log_action("Disconnected from the SO, server ready", kind="system")
+
+    def _log_failed_dial_out(self, task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            self._log_action(
+                f"Task 'ws' failed: {task.exception()}", "error", kind="system"
+            )
+
+    def stop_server(self) -> None:
+        """Stop the server."""
+        loop = self.runtime.loop
+        status = self.runtime.status
+
+        if status in (None, "stopped"):
+            self._set_runtime_state(status="stopped")
+            return
+
+        if loop is None or not loop.is_running():
+            # If the event loop is already gone, consider the server stopped.
+            self._set_runtime_state(
+                status="stopped", endpoint=None, server_cp=None, tasks={}, error=None
+            )
+            return
+
+        self._set_runtime_state(status="stopping")
+        fut = asyncio.run_coroutine_threadsafe(self._stop_server_async(), loop)
+        try:
+            fut.result(timeout=10)
+        except FuturesTimeoutError:
+            # Avoid surfacing 500 to UI when shutdown is still unwinding.
+            self._log_action(
+                "Stop in progress (timeout waiting for shutdown).",
+                "warn",
+                kind="system",
+            )
+        except Exception:
+            # If stop is already in progress or completed, avoid hard failure.
+            current = self.runtime.status
+            if current not in ("stopping", "stopped"):
+                raise
+
+    def invoke_on_runtime_loop(self, coro: Any, timeout: int = 10) -> Any:
+        """Execute a coroutine on the runtime event loop."""
+        loop = self.runtime.loop
+        if loop is None or not loop.is_running():
+            # coro was already constructed by the caller (e.g.
+            # server.get_data_value_and_type(obj_ref)) before this call -
+            # close it explicitly so it doesn't trigger a "coroutine was
+            # never awaited" RuntimeWarning now that it can't be scheduled.
+            coro.close()
+            raise RuntimeError("server-not-running")
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=timeout)
+
+    def coerce_server_write_value(self, value: Any, data_type: str) -> Any:
+        """Coerce a value to the appropriate data type."""
+        dt = str(data_type or "").lower()
+
+        if dt == "boolean":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
+        if dt in ("int8", "int16", "int32", "int64", "int8u", "int16u", "int32u"):
+            return int(value)
+
+        if dt in ("float32", "float64"):
+            return float(value)
+
+        if dt in (
+            "visstring32",
+            "visstring64",
+            "visstring65",
+            "visstring129",
+            "visstring255",
+            "string",
+            "enumerated",
+        ):
+            if dt == "enumerated":
+                return int(value)
+            return str(value)
+
+        return value
+
+    def read_value(self, obj_ref: str) -> dict[str, Any]:
+        """Read a value from the server."""
+        server = self.runtime.server
+        if server is None:
+            raise RuntimeError("Server is not running")
+
+        result = self.invoke_on_runtime_loop(
+            server.get_data_value_and_type(obj_ref), timeout=10
+        )
+        # result = server.read_value(obj_ref)
+
+        if result is None:
+            raise ValueError(f"instanceNotAvailable: {obj_ref}")
+
+        return result
+
+    def write_value(
+        self, obj_ref: str, value: Any, data_type: str = "unknown"
+    ) -> dict[str, Any]:
+        """Write a value to the server."""
+        server = self.runtime.server
+        if server is None:
+            raise RuntimeError("Server is not running")
+
+        item = server.find_object_in_tree(obj_ref)
+        if item is None:
+            raise ValueError(f"instanceNotAvailable: {obj_ref}")
+
+        resolved_data_type = data_type
+        if (
+            str(data_type or "").lower() in ("", "unknown")
+            and isinstance(item, DataAttribute)
+            and item.type is not None
+        ):
+            resolved_data_type = item.type.name
+
+        coerced_value = self.coerce_server_write_value(value, resolved_data_type)
+        self.invoke_on_runtime_loop(
+            server.update_value(obj_ref, coerced_value), timeout=10
+        )
+        try:
+            server.update_timestamp(item)
+        except Exception:
+            # Not all items have an associated timestamp DA; ignore if missing.
+            pass
+
+        return {
+            "objRef": obj_ref,
+            "value": coerced_value,
+            "dataType": resolved_data_type,
+        }
+
+    def get_status(self) -> dict[str, Any]:
+        """Get current server status including model versioning information."""
+        endpoint = self.runtime.endpoint
+        connected = len(endpoint.websocket_info_list) if endpoint is not None else 0
+        tasks = self.runtime.tasks or {}
+
+        status_info = {
+            "status": self.runtime.status,
+            "host": self.runtime.host,
+            "port": self.runtime.port,
+            "error": self.runtime.error,
+            "connectedClients": connected,
+            "tasks": {k: (not v.done()) for k, v in tasks.items()},
+            "accessPoints": [self.runtime.cp or "cp1"],
+            # Model versioning information
+            "modelVersion": self.runtime.model_version,
+            "modelReloadInProgress": self.runtime.model_reload_in_progress,
+            "pendingModel": self.runtime.pending_model is not None,
+            "modelName": self.runtime.model_ied_name,
+            "modelSource": self.runtime.model_source,
+        }
+
+        # Add model reload progress if in reloading state
+        if self.runtime.status == "reloading":
+            status_info["reloadProgress"] = "swapping_server_instances"
+
+        return status_info
+
+    def get_actions(self) -> list[dict[str, Any]]:
+        """Get logged actions."""
+        with self.runtime.lock:
+            return list(self.runtime.actions)
+
+    def get_messages(self) -> list[dict[str, Any]]:
+        """Get logged messages."""
+        with self.runtime.lock:
+            return list(self.runtime.messages)
+
+    def clear_actions(self) -> None:
+        """Clear action log."""
+        with self.runtime.lock:
+            self.runtime.actions.clear()
+
+    def clear_messages(self) -> None:
+        """Clear message log."""
+        with self.runtime.lock:
+            self.runtime.messages.clear()

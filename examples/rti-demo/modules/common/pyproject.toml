@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "rti-common"
+version = "0.1.0"
+description = "RTI Demo: code the BFF, SO and FSP share, such as their log level (specs 0010, 0011)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.139.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast, isolated unit tests (no Docker/network required)",
+]

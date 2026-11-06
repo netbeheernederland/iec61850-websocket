@@ -1,0 +1,76 @@
+/*
+ * SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Copyright 2025-2026 Netbeheer Nederland
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// src/components/ContextMenu.jsx
+import React, { useEffect, useRef } from 'react';
+
+const ContextMenu = ({ x, y, visible, onClose, items }) => {
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        onClose();
+      }
+    };
+    if (visible) {
+      document.addEventListener('click', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('click', handleClickOutside);
+    };
+  }, [visible, onClose]);
+
+  if (!visible || items.length === 0) return null;
+
+  return (
+    <div
+      ref={menuRef}
+      className="context-menu"
+      style={{
+        position: 'fixed',
+        left: `${x}px`,
+        top: `${y}px`,
+        border: '1px solid var(--border-color)',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+        zIndex: 10000,
+        minWidth: '150px',
+        padding: '4px 0',
+        fontSize: '14px',
+      }}
+    >
+      {items.map((item, index) => (
+        <div
+          key={item.id || index}
+          className={`context-menu-item${item.danger ? ' danger' : ''}${item.disabled ? ' disabled' : ''}`}
+          onClick={() => {
+            if (item.action) item.action();
+            onClose();
+          }}
+          style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', opacity: item.disabled ? 0.6 : 1 }}
+        >
+          {item.icon && <i className={`fas ${item.icon}${item.icon === 'fa-spinner' ? ' fa-spin' : ''}`} style={{ marginRight: '8px' }} />}
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+export default ContextMenu;

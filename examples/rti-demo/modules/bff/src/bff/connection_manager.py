@@ -1,0 +1,1035 @@
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2025-2026 Netbeheer Nederland
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Connection Management Module for RTI Demo BFF.
+
+This module provides centralized management of connections to RTI services (FSP, SO, demo_IO, IDP-Server).
+It handles:
+- Connection CRUD operations (Create, Read, Update, Delete)
+- Persistent storage to connections.json file
+- Health monitoring of all registered connections
+- Auto-discovery of services (Docker containers, network scanning)
+- OAuth and TLS configuration per connection
+- BFF client instantiation for each connection
+
+The ConnectionManager is a core component of the BFF server, enabling it to:
+1. Maintain a registry of all backend service endpoints
+2. Monitor service health and availability
+3. Proxy requests to the appropriate backend service
+4. Manage authentication (OAuth) and encryption (TLS) settings
+"""
+
+import asyncio
+import json
+import os
+import stat
+import tempfile
+import threading
+import time
+import uuid
+from collections import deque
+from datetime import datetime
+
+import httpx2 as httpx
+
+from bff.bff_client import BffClient
+
+
+class ConnectionConflictError(Exception):
+    """A connection can't take a name: another connection has it."""
+
+
+def new_connection_id() -> str:
+    """A connection's id: an opaque UUID (version 4), so ids never repeat,
+    across deletes and across BFFs, and carry no meaning of their own."""
+    return str(uuid.uuid4())
+
+
+def is_connection_id(value) -> bool:
+    """Whether `value` is an id as new_connection_id() makes them."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def name_key(name) -> str:
+    """What two names must differ in: not only case or surrounding spaces."""
+    return str(name or "").strip().casefold()
+
+
+def client_key(con: dict) -> str | None:
+    """The connection's key in _bff_clients, "host:port"; None without both."""
+    host, port = con.get("host"), con.get("port")
+    return f"{host}:{port}" if host and port else None
+
+
+# A new connections file: readable and writable by its group too, so a
+# bind-mounted config directory shared through a group (the BFF image's user
+# and the host user) works both ways.
+NEW_FILE_MODE = 0o664
+
+
+def _file_mode(path: str) -> int:
+    """The permission bits `path` has, or NEW_FILE_MODE when it doesn't exist."""
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        return NEW_FILE_MODE
+
+
+class ConnectionManager:
+    """Manages connections to remote RTI endpoints.
+
+    This class is responsible for:
+    - Maintaining a list of all configured connections
+    - Loading/saving connections from/to connections.json
+    - Creating BffClient instances for each connection
+    - Monitoring connection health status
+    - Auto-registering discovered services
+    - Providing connection lookup by name or host:port
+
+    Attributes:
+        connections_file: Path to the JSON file for persistent storage
+        _bff_clients: Dictionary of BffClient instances keyed by "host:port"
+        connections: List of connection dictionaries
+        logger: Logger instance for connection-related messages
+    """
+
+    # A failed TLS/OAuth re-apply (e.g. a bad stored cert) is retried at most
+    # this often - each attempt restarts the SO's WebSocket listener, so
+    # retrying on every status poll would keep knocking it over.
+    SECURITY_SYNC_RETRY_SECONDS = 60
+    # The SO's /reconfig-connection and /reconfig-oauth stop and restart its
+    # listener (incl. a 3 s port-release wait), far longer than the 2 s
+    # health-check timeout.
+    SECURITY_SYNC_TIMEOUT_SECONDS = 40
+
+    def __init__(self, bff_clients, connections_file, logger) -> None:
+        self.connections_file = connections_file
+        self._bff_clients = bff_clients
+        self.logger = logger
+
+        self.connections, repaired = self._checked(self.load_connections())
+        if repaired:
+            try:
+                self.save_connections()
+            except OSError as e:
+                self.logger.warning(f"Could not save the repaired connections: {e}")
+        self.status_task = None
+        # Reusable HTTP client (connection pooling + keep-alive) for health checks.
+        self._client: httpx.AsyncClient | None = None
+        # (connection name, "tls" | "oauth") -> time.monotonic() of its last
+        # failed re-apply - separate per kind, so a failing TLS re-apply
+        # doesn't also hold back OAuth.
+        self._sync_failures: dict[tuple[str, str], float] = {}
+        # The BFF's own system events (an instance coming up / dropping, a
+        # TLS/OAuth re-apply succeeding or failing, the startup IDP check),
+        # for the HMI's Diagnostics page next to each instance's own system
+        # entries - see docs/rti-demo/design/logging-kinds.md. Same shape as
+        # an instance's actions-log entry, plus the instance it concerns.
+        self.events: deque = deque(maxlen=200)
+        self._event_seq = 0
+        self._events_lock = threading.Lock()
+        # Last status reported as an event, per connection name - not the
+        # status loaded from connections.json, which persists across BFF
+        # restarts and would otherwise hide the first check's result.
+        self._reported_status: dict[str, str] = {}
+        # Give every connection an initial status so the UI can render instantly.
+        for con in self.connections:
+            con.setdefault("status", "checking")
+
+        self._register_connections_as_clients()
+
+    def log_event(
+        self,
+        message: str,
+        level: str = "info",
+        *,
+        instance: str = "",
+        detail: dict | None = None,
+    ) -> None:
+        """Record a BFF system event (kind "system") and log it as usual."""
+        log = {"error": self.logger.error, "warn": self.logger.warning}.get(
+            level, self.logger.info
+        )
+        log(message)
+        with self._events_lock:
+            self._event_seq += 1
+            self.events.append(
+                {
+                    "id": self._event_seq,
+                    "time": time.strftime("%H:%M:%S"),
+                    "kind": "system",
+                    "level": level,
+                    "message": message,
+                    "detail": detail or {},
+                    "instance": instance,
+                }
+            )
+
+    def get_events(self) -> list[dict]:
+        with self._events_lock:
+            return list(self.events)
+
+    def _register_connections_as_clients(self) -> None:
+        """Register BFF clients for all current connections."""
+        for con in self.connections:
+            host = con.get("host")
+            port = con.get("port")
+            if host and port:
+                key = f"{host}:{port}"
+                if key not in self._bff_clients:
+                    self._bff_clients[key] = BffClient(f"http://{host}:{port}")
+
+    def get_client(self) -> httpx.AsyncClient:
+        """Return a shared AsyncClient, creating it lazily.
+
+        Creates a single httpx.AsyncClient instance with 2-second timeout
+        that is reused for all health check requests to avoid connection overhead.
+
+        Returns:
+            Shared httpx.AsyncClient instance
+        """
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=2.0)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def status_monitor(self, interval=10):
+        # Run an immediate check so cards populate on startup instead of
+        # waiting for the first interval to elapse.
+        await self.get_all_connections_with_status()
+        await self.sync_all_runtime_security()
+        while True:
+            await asyncio.sleep(interval)
+            await self.get_all_connections_with_status()
+            await self.sync_all_runtime_security()
+
+    async def sync_all_runtime_security(self) -> None:
+        """Re-apply stored TLS, then OAuth, to every connected RTI-SO.
+
+        The SO keeps both only in memory, so after a container restart it
+        comes back as plain, unauthenticated WS while connections.json still
+        says otherwise. Per SO, TLS and OAuth run one after the other - each
+        restarts the SO's listener - while different SOs run concurrently.
+        RTI-FSP isn't handled here: its dial-out only starts on Connect,
+        which applies the stored TLS (/api/execute's /start enrichment) and
+        OAuth (the HMI's reconfig-oauth after /start) itself.
+        """
+        client = self.get_client()
+
+        async def sync_one(con):
+            await self.sync_runtime_tls(con, client)
+            await self.sync_runtime_oauth(con, client)
+
+        await asyncio.gather(*(sync_one(con) for con in self.connections))
+
+    def _resync_base_url(self, con, block: str, kind: str) -> str | None:
+        """The SO's base URL if `con` is due a `kind` re-apply check, else None."""
+        if (
+            con.get("type") != "RTI-SO"
+            or not con.get(block)
+            or con.get("status") != "connected"
+        ):
+            return None
+        last_failure = self._sync_failures.get((con.get("name"), kind))
+        if (
+            last_failure is not None
+            and time.monotonic() - last_failure < self.SECURITY_SYNC_RETRY_SECONDS
+        ):
+            return None
+        return f"http://{con['host']}:{con['port']}"
+
+    async def _get_runtime(self, client, url: str, name: str) -> dict | None:
+        try:
+            response = await client.get(url)
+            runtime = response.json()
+        except (httpx.RequestError, ValueError) as e:
+            self.logger.debug(f"Runtime check {url} failed for {name}: {e}")
+            return None
+        if not isinstance(runtime, dict) or not runtime.get("ok"):
+            return None
+        return runtime
+
+    async def _reapply(self, client, name: str, kind: str, url: str, body) -> None:
+        try:
+            response = await client.post(
+                url, json=body, timeout=self.SECURITY_SYNC_TIMEOUT_SECONDS
+            )
+            payload = response.json()
+            error = (
+                None
+                if response.status_code < 400 and payload.get("ok")
+                else payload.get("error") or f"HTTP {response.status_code}"
+            )
+        except (httpx.RequestError, ValueError) as e:
+            error = str(e)
+
+        if error is None:
+            self._sync_failures.pop((name, kind), None)
+            self.log_event(
+                f"Stored {kind.upper()} config re-applied to {name}", instance=name
+            )
+        else:
+            self._sync_failures[(name, kind)] = time.monotonic()
+            self.log_event(
+                f"Re-applying stored {kind.upper()} config to {name} failed: {error}",
+                "warn",
+                instance=name,
+            )
+
+    @staticmethod
+    def _normalize_tls_version(version) -> str:
+        # Same "1.2"/"TLSv1_2" vs. everything-else-is-1.3 rule the SO's own
+        # /reconfig-connection applies, so both sides compare alike.
+        version = str(version or "").lower()
+        return "1.2" if "1.2" in version or "1_2" in version else "1.3"
+
+    async def sync_runtime_tls(self, con, client) -> None:
+        """Re-apply a connected RTI-SO's stored TLS config if its runtime differs."""
+        base_url = self._resync_base_url(con, "TLS", "tls")
+        if base_url is None:
+            return
+        name = con.get("name")
+        stored = con["TLS"]
+        runtime = await self._get_runtime(client, f"{base_url}/api/tls-config", name)
+        if runtime is None:
+            return
+
+        want_tls = bool(stored.get("enable_tls"))
+        in_sync = bool(runtime.get("enable_tls")) == want_tls and (
+            not want_tls
+            or (
+                self._normalize_tls_version(runtime.get("tls_version"))
+                == self._normalize_tls_version(stored.get("tls_version"))
+                and runtime.get("server_cert") == stored.get("server_cert")
+            )
+        )
+        if in_sync:
+            self._sync_failures.pop((name, "tls"), None)
+            return
+
+        self.logger.info(
+            f"Re-applying stored TLS config to {name} "
+            f"(enable_tls={want_tls}, tls_version={stored.get('tls_version')})"
+        )
+        await self._reapply(
+            client,
+            name,
+            "tls",
+            f"{base_url}/api/reconfig-connection",
+            {
+                "connection_name": name,
+                "enable_tls": want_tls,
+                "tls_version": stored.get("tls_version"),
+                "server_key": stored.get("server_key"),
+                "server_cert": stored.get("server_cert"),
+                "server_ca": stored.get("server_ca"),
+                "ws_mode": con.get("ws_mode") or "passive",
+            },
+        )
+
+    async def sync_runtime_oauth(self, con, client) -> None:
+        """Re-apply a connected RTI-SO's stored OAuth config if its runtime differs.
+
+        The SO's /oauth-status only reports on/off, so that's what's compared;
+        changed endpoints are applied by the OAuth Config dialog itself.
+        """
+        base_url = self._resync_base_url(con, "OAuth", "oauth")
+        if base_url is None:
+            return
+        name = con.get("name")
+        stored = con["OAuth"]
+        runtime = await self._get_runtime(client, f"{base_url}/api/oauth-status", name)
+        if runtime is None:
+            return
+
+        want_oauth = bool(stored.get("enable_oauth"))
+        if bool(runtime.get("enable_oauth")) == want_oauth:
+            self._sync_failures.pop((name, "oauth"), None)
+            return
+
+        self.logger.info(
+            f"Re-applying stored OAuth config to {name} (enable_oauth={want_oauth})"
+        )
+        await self._reapply(
+            client,
+            name,
+            "oauth",
+            f"{base_url}/api/reconfig-oauth",
+            {
+                "connection_name": name,
+                "enable_oauth": want_oauth,
+                "ws_mode": con.get("ws_mode") or "passive",
+                "certificate_endpoint_url": stored.get("certificate_endpoint"),
+                "token_issuer_url": stored.get("token_issuer"),
+                "ca_certificate": stored.get("auth_server_ca"),
+            },
+        )
+
+    def load_connections(self) -> list[dict]:
+        """Load connections from file."""
+        if os.path.exists(self.connections_file):
+            try:
+                with open(self.connections_file) as f:
+                    return json.load(f)
+            except Exception as e:
+                self.logger.error(f"Error loading connections: {e}")
+        return []
+
+    def _checked(self, loaded) -> tuple[list[dict], bool]:
+        """The loaded connections with unique names and ids, and whether
+        anything had to change.
+
+        A connection without a name, or with the name (see name_key) of one
+        before it, is dropped and logged: names are how connections are
+        found, so a second one could never be reached. An id that isn't a
+        UUID (the old 1, 2, 3, ...) or that repeats gets a new one.
+        """
+        if not isinstance(loaded, list):
+            self.logger.error("connections file isn't a list; starting empty")
+            return [], False
+        kept: list[dict] = []
+        names: set[str] = set()
+        ids: set[str] = set()
+        changed = False
+        for con in loaded:
+            key = name_key(con.get("name")) if isinstance(con, dict) else ""
+            if not key:
+                self.logger.error(f"Dropped a connection without a name: {con!r}")
+                changed = True
+                continue
+            if key in names:
+                self.logger.error(
+                    f"Dropped connection '{con['name']}' ({client_key(con)}): "
+                    "another connection has that name"
+                )
+                changed = True
+                continue
+            names.add(key)
+            if not is_connection_id(con.get("id")) or con["id"] in ids:
+                con["id"] = new_connection_id()
+                changed = True
+            ids.add(con["id"])
+            kept.append(con)
+        return kept, changed
+
+    def save_connections(self) -> None:
+        """Persist connections to disk atomically.
+
+        Writes a temp file in the same directory and then atomically replaces
+        the target, so a failed or partial write never truncates or corrupts
+        an existing ``connections.json``.
+
+        Raises:
+            OSError: if the file (or its directory) cannot be written, e.g.
+                ``PermissionError`` when the volume is mounted read-only or the
+                process user lacks write rights. The error is logged and then
+                re-raised so callers can surface it instead of silently losing
+                the change.
+        """
+        target = self.connections_file
+        directory = os.path.dirname(os.path.abspath(target)) or "."
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".connections-", suffix=".json.tmp", dir=directory
+            )
+            # mkstemp makes the file owner-only (0600), and os.replace keeps
+            # that: every save would leave the file unreadable to anyone but
+            # the BFF's user (on a bind mount, not the host user who edits
+            # it). Keep the mode the file had instead.
+            os.fchmod(fd, _file_mode(target))
+            with os.fdopen(fd, "w") as f:
+                json.dump(self.connections, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, target)
+            tmp_path = None
+        except Exception as e:
+            self.logger.error(f"Error saving connections to {target}: {e}")
+            raise
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    def add_connection(
+        self,
+        name: str,
+        host: str | None = None,
+        port: int | None = None,
+        conn_type: str = "",
+        acsi: str | None = None,
+        ws_mode: str | None = None,
+        endpoint: str | None = None,
+        certificate_endpoint: str | None = None,
+        auth_server_ca: str | None = None,
+        realm: str | None = None,
+        token_endpoint: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        enable_token_refresh: bool | None = None,
+        idp_server: str | None = None,
+        auto_discovered: bool = False,
+        ws_port: int | None = None,
+        cp: str | None = None,
+    ) -> dict:
+        """Add a new connection.
+
+        Args:
+            name: Human-readable name for the connection
+            host: Hostname or IP address of the endpoint's BFF server
+            port: Port number of the endpoint's BFF server (used for /api/execute proxying)
+            conn_type: Type of endpoint
+            acsi: ACSI role (server/client)
+            ws_mode: WebSocket mode
+            auto_discovered: Whether this connection was auto-discovered
+            ws_port: Port the RTI-SO instance's own WebSocket (Passive) endpoint
+                listens on - distinct from `port` above (the BFF server port),
+                and only meaningful for RTI-SO connections. An RTI-FSP's
+                "Start Server" dials out to this SO-side ws_port/host, not to
+                the SO's BFF port.
+            cp: Connection point identifier this RTI-FSP registers under -
+                only meaningful for RTI-FSP connections.
+
+        Returns:
+            The created connection dictionary.
+        """
+        # Check if connection already exists (for non-IDP-Server types)
+        if conn_type != "IDP-Server" and host and port:
+            existing = next(
+                (
+                    c
+                    for c in self.connections
+                    if c.get("host") == host
+                    and c.get("port") == port
+                    and c["name"] == name
+                ),
+                None,
+            )
+            if existing:
+                self.logger.warning(f"Connection already exists: {host}:{port}")
+                return existing
+
+        connection_in_file = next(
+            (c for c in self.connections if c["name"] == name), None
+        )
+        if connection_in_file:
+            # Track old host:port for _bff_clients cleanup (for non-IDP-Server types)
+            old_key = (
+                f"{connection_in_file.get('host')}:{connection_in_file.get('port')}"
+                if connection_in_file.get("host") and connection_in_file.get("port")
+                else None
+            )
+
+            if conn_type == "IDP-Server":
+                connection_in_file["type"] = conn_type
+                if endpoint is not None:
+                    connection_in_file["endpoint"] = endpoint
+
+                # For IDP-Server, also update OAuth fields
+                # Create OAuth object if any OAuth fields are provided
+                oauth_fields = {}
+                if certificate_endpoint is not None:
+                    oauth_fields["certificate_endpoint"] = certificate_endpoint
+                if auth_server_ca is not None:
+                    oauth_fields["auth_server_ca"] = auth_server_ca
+                if realm is not None:
+                    oauth_fields["realm"] = realm
+                if token_endpoint is not None:
+                    oauth_fields["token_endpoint"] = token_endpoint
+                if client_id is not None:
+                    oauth_fields["client_id"] = client_id
+                if client_secret is not None:
+                    oauth_fields["client_secret"] = client_secret
+                if enable_token_refresh is not None:
+                    oauth_fields["enable_token_refresh"] = enable_token_refresh
+                if idp_server is not None:
+                    oauth_fields["idp_server"] = idp_server
+
+                if oauth_fields:
+                    if "OAuth" not in connection_in_file:
+                        connection_in_file["OAuth"] = {}
+                    connection_in_file["OAuth"].update(oauth_fields)
+
+                # Clean up any OAuth fields that were previously at top level
+                top_level_oauth_fields = [
+                    "certificate_endpoint",
+                    "auth_server_ca",
+                    "realm",
+                    "token_endpoint",
+                    "client_id",
+                    "client_secret",
+                    "enable_token_refresh",
+                    "idp_server",
+                ]
+                for field in top_level_oauth_fields:
+                    if field in connection_in_file:
+                        del connection_in_file[field]
+            else:
+                connection_in_file["host"] = host
+                connection_in_file["port"] = port
+                connection_in_file["type"] = conn_type
+                connection_in_file["acsi"] = acsi
+                connection_in_file["ws_mode"] = ws_mode
+                if ws_port is not None:
+                    connection_in_file["ws_port"] = ws_port
+                if cp is not None:
+                    connection_in_file["cp"] = cp
+
+                # Update OAuth fields for non-IDP-Server types
+                oauth_fields = {}
+                if certificate_endpoint is not None:
+                    oauth_fields["certificate_endpoint"] = certificate_endpoint
+                if auth_server_ca is not None:
+                    oauth_fields["auth_server_ca"] = auth_server_ca
+                if realm is not None:
+                    oauth_fields["realm"] = realm
+                if token_endpoint is not None:
+                    oauth_fields["token_endpoint"] = token_endpoint
+                if client_id is not None:
+                    oauth_fields["client_id"] = client_id
+                if client_secret is not None:
+                    oauth_fields["client_secret"] = client_secret
+                if enable_token_refresh is not None:
+                    oauth_fields["enable_token_refresh"] = enable_token_refresh
+                if idp_server is not None:
+                    oauth_fields["idp_server"] = idp_server
+
+                if oauth_fields:
+                    if "OAuth" not in connection_in_file:
+                        connection_in_file["OAuth"] = {}
+                    connection_in_file["OAuth"].update(oauth_fields)
+
+                # Clean up any OAuth fields that were previously at top level
+                top_level_oauth_fields = [
+                    "certificate_endpoint",
+                    "auth_server_ca",
+                    "realm",
+                    "token_endpoint",
+                    "client_id",
+                    "client_secret",
+                    "enable_token_refresh",
+                    "idp_server",
+                ]
+                for field in top_level_oauth_fields:
+                    if field in connection_in_file:
+                        del connection_in_file[field]
+
+                self.rebind_client(old_key, connection_in_file)
+
+            self.save_connections()
+            return connection_in_file
+
+        connection = {
+            "id": new_connection_id(),
+            "name": name,
+            "host": host,
+            "port": port,
+            "ws_port": ws_port,
+            "type": conn_type,
+            "acsi": acsi,
+            "ws_mode": ws_mode,
+            "auto_discovered": auto_discovered,
+            "created_at": datetime.now().isoformat(),
+        }
+
+        if cp is not None:
+            connection["cp"] = cp
+
+        # Add endpoint for IDP-Server
+        if conn_type == "IDP-Server" and endpoint is not None:
+            connection["endpoint"] = endpoint
+
+        # Create OAuth object if any OAuth fields are provided
+        oauth_fields = {}
+        if certificate_endpoint is not None:
+            oauth_fields["certificate_endpoint"] = certificate_endpoint
+        if auth_server_ca is not None:
+            oauth_fields["auth_server_ca"] = auth_server_ca
+        if realm is not None:
+            oauth_fields["realm"] = realm
+        if token_endpoint is not None:
+            oauth_fields["token_endpoint"] = token_endpoint
+        if client_id is not None:
+            oauth_fields["client_id"] = client_id
+        if client_secret is not None:
+            oauth_fields["client_secret"] = client_secret
+        if enable_token_refresh is not None:
+            oauth_fields["enable_token_refresh"] = enable_token_refresh
+        if idp_server is not None:
+            oauth_fields["idp_server"] = idp_server
+
+        if oauth_fields:
+            connection["OAuth"] = oauth_fields
+
+        self.connections.append(connection)
+        self.save_connections()
+
+        # Only create BFF client for non-IDP-Server types with host and port
+        if conn_type != "IDP-Server" and host and port:
+            key = f"{host}:{port}"
+            if key not in self._bff_clients:
+                self._bff_clients[key] = BffClient(f"http://{host}:{port}")
+
+        self.logger.info(f"Connection added: {name} ({host}:{port})")
+        return connection
+
+    def delete_connection(self, conn_name) -> bool:
+        """Delete a connection by name.
+
+        Removes the connection from the connections list and deletes the associated
+        BffClient instance. Also saves the updated connections to disk.
+
+        Args:
+            conn_name: Name of the connection to delete
+
+        Returns:
+            bool: True if connection was found and deleted, False otherwise
+        """
+        connection = self.get_connection(conn_name)
+        if connection is None:
+            return False
+        # This one connection, not every one that happens to share its name.
+        self.connections = [c for c in self.connections if c is not connection]
+        self.save_connections()
+        self.release_client(client_key(connection))
+        self.logger.info(f"Connection deleted: {conn_name}")
+        return True
+
+    # ==================== Names and clients ====================
+
+    def find_by_name(self, name: str) -> dict | None:
+        """The connection whose name is `name`, up to case and surrounding spaces."""
+        key = name_key(name)
+        return next(
+            (c for c in self.connections if name_key(c.get("name")) == key), None
+        )
+
+    def claim_name(self, name: str, connection: dict | None = None) -> str:
+        """`name` without surrounding spaces, once it's checked that no
+        connection other than `connection` has it.
+
+        Raises:
+            ValueError: the name is empty.
+            ConnectionConflictError: another connection has it.
+        """
+        clean = str(name or "").strip()
+        if not clean:
+            raise ValueError("A connection needs a name")
+        other = self.find_by_name(clean)
+        if other is not None and other is not connection:
+            where = client_key(other) or other.get("endpoint") or other.get("type")
+            raise ConnectionConflictError(
+                f"A connection named '{other['name']}' already exists ({where}); "
+                "choose another name, or edit that one"
+            )
+        return clean
+
+    def create_connection(self, name: str, **fields) -> tuple[dict, bool]:
+        """Register a new connection under a name no other connection has
+        (POST /api/add-connection); add_connection's keyword arguments.
+
+        Registering the same name, type and address again changes nothing:
+        it returns (that connection, False). Otherwise (new connection, True).
+
+        Raises:
+            ValueError: the name is empty.
+            ConnectionConflictError: another connection has the name.
+        """
+        existing = self.find_by_name(name)
+        if existing is not None and existing.get("type") == fields.get("conn_type"):
+            same = (
+                existing.get("endpoint") == fields.get("endpoint")
+                if existing.get("type") == "IDP-Server"
+                else (existing.get("host"), existing.get("port"))
+                == (fields.get("host"), fields.get("port"))
+            )
+            if same and existing["name"] == str(name).strip():
+                return existing, False
+        clean = self.claim_name(name)
+        return self.add_connection(name=clean, **fields), True
+
+    def rebind_client(self, old_key: str | None, connection: dict) -> None:
+        """After `connection`'s host or port changed from `old_key`: a client
+        for its new address, and the old one released."""
+        new_key = client_key(connection)
+        if new_key == old_key:
+            return
+        if new_key and new_key not in self._bff_clients:
+            self._bff_clients[new_key] = BffClient(f"http://{new_key}")
+        self.release_client(old_key)
+
+    def release_client(self, key: str | None) -> None:
+        """Drop the client for `key`, unless a connection still uses it:
+        two connections may name the same instance."""
+        if not key or any(client_key(c) == key for c in self.connections):
+            return
+        self._bff_clients.pop(key, None)
+
+    def get_connection(self, conn_name: str) -> dict | None:
+        """Get a specific connection by name.
+
+        Args:
+            conn_name: Name of the connection to retrieve
+
+        Returns:
+            Connection dictionary if found, None otherwise
+        """
+        return next((c for c in self.connections if c["name"] == conn_name), None)
+
+    def get_connection_by_host_port(self, host: str, port: int) -> dict | None:
+        """Get connection by host and port.
+
+        Useful for looking up connections when you have network coordinates
+        but not the connection name.
+
+        Args:
+            host: Hostname or IP address
+            port: Port number
+
+        Returns:
+            Connection dictionary if found, None otherwise
+        """
+        return next(
+            (c for c in self.connections if c["host"] == host and c["port"] == port),
+            None,
+        )
+
+    def update_connection_status(self, conn_name: str, status: str) -> None:
+        """Update connection status and save to disk.
+
+        Args:
+            conn_name: Name of the connection to update
+            status: New status value (e.g., 'connected', 'disconnected', 'error')
+        """
+        conn = self.get_connection(conn_name)
+        if conn:
+            conn["status"] = status
+            try:
+                self.save_connections()
+            except OSError as e:
+                # Status refreshes are frequent and transient; a persistence
+                # failure here must not propagate and kill the caller/monitor.
+                self.logger.warning(f"Could not persist status for {conn_name}: {e}")
+
+    def auto_register_discovered(self, discovered: dict[str, dict]) -> int:
+        """Auto-register discovered services as connections.
+
+        Args:
+            discovered: Dictionary of discovered services
+
+        Returns:
+            Number of services registered.
+        """
+        registered = 0
+        for service_name, service_info in discovered.items():
+            existing = self.get_connection_by_host_port(
+                service_info["host"], service_info["port"]
+            )
+            if not existing:
+                taken = self.find_by_name(service_info["name"])
+                if taken is not None:
+                    self.logger.warning(
+                        f"Discovered {service_info['name']} at "
+                        f"{service_info['host']}:{service_info['port']} not "
+                        f"registered: '{taken['name']}' is {client_key(taken)}"
+                    )
+                    continue
+                self.add_connection(
+                    name=service_info["name"],
+                    host=service_info["host"],
+                    port=service_info["port"],
+                    conn_type=service_info["type"],
+                    auto_discovered=True,
+                )
+                registered += 1
+        return registered
+
+    async def check_connection(self, con, client):
+        # For IDP-Server, check via endpoint or host:port
+        if con.get("type") == "IDP-Server":
+            # Create a client that doesn't verify SSL for IDP servers
+            # (Keycloak often uses self-signed certs)
+            idp_client = httpx.AsyncClient(timeout=2.0, verify=False)
+
+            try:
+                # Try to use host:port first if available (for local IDP servers)
+                host = con.get("host")
+                port = con.get("port")
+                endpoint = con.get("endpoint")
+
+                if host and port:
+                    # Use host:port if both are defined
+                    url = f"http://{host}:{port}"
+                elif endpoint:
+                    # Otherwise, use the endpoint
+                    if endpoint.startswith("http://") or endpoint.startswith(
+                        "https://"
+                    ):
+                        url = endpoint
+                    else:
+                        # If it's just a path, try localhost with common IDP ports
+                        # Try HTTPS first (common for Keycloak)
+                        url = f"https://localhost{endpoint if endpoint.startswith('/') else '/' + endpoint}"
+                else:
+                    # No endpoint or host/port defined, mark as disconnected
+                    con["status"] = "disconnected"
+                    return
+
+                response = await idp_client.get(url)
+                con["status"] = (
+                    "connected" if response.status_code < 500 else "disconnected"
+                )
+            except httpx.RequestError as e:
+                # Try HTTP if HTTPS failed
+                if (
+                    endpoint
+                    and not endpoint.startswith("http://")
+                    and not endpoint.startswith("https://")
+                ):
+                    try:
+                        url = f"http://localhost{endpoint if endpoint.startswith('/') else '/' + endpoint}"
+                        response = await idp_client.get(url)
+                        con["status"] = (
+                            "connected"
+                            if response.status_code < 500
+                            else "disconnected"
+                        )
+                        await idp_client.aclose()
+                        return
+                    except httpx.RequestError as e2:
+                        self.logger.debug(
+                            f"IDP-Server connection check failed for {con.get('name')}: {e2}"
+                        )
+                        con["status"] = "disconnected"
+                else:
+                    self.logger.debug(
+                        f"IDP-Server connection check failed for {con.get('name')}: {e}"
+                    )
+                    con["status"] = "disconnected"
+            finally:
+                await idp_client.aclose()
+            return
+
+        # For other types, check connectivity via host:port
+        if not con.get("host") or not con.get("port"):
+            con["status"] = "disconnected"
+            return
+
+        try:
+            response = await client.get(
+                f"http://{con['host']}:{con['port']}/api/health",
+            )
+            con["status"] = (
+                "connected" if response.status_code < 500 else "disconnected"
+            )
+        except httpx.RequestError:
+            con["status"] = "disconnected"
+
+    async def get_all_connections_with_status(self):
+        client = self.get_client()
+        await asyncio.gather(
+            *(self.check_connection(con, client) for con in self.connections)
+        )
+        for con in self.connections:
+            self._log_status_change(con)
+        return self.connections
+
+    def _log_status_change(self, con) -> None:
+        """Record an instance's status the first time this BFF checks it, and
+        then only when it comes up or drops (not every health tick)."""
+        status = con.get("status")
+        if status not in ("connected", "disconnected"):
+            return
+        name = con.get("name", "")
+        previous = self._reported_status.get(name)
+        if status == previous:
+            return
+        self._reported_status[name] = status
+        if status == "connected":
+            self.log_event(f"{name} is reachable", instance=name)
+        elif previous == "connected":
+            self.log_event(f"{name} stopped responding", "warn", instance=name)
+        else:  # first check since this BFF started (or since registration)
+            self.log_event(f"{name} is not reachable", "warn", instance=name)
+
+    async def validate_idp_server_on_start(self) -> None:
+        """Validate the most recently added IDP-Server connection at startup.
+
+        Only the latest one (latest `created_at`; the last in the list
+        without one) is checked - if several IDP-Server
+        connections are registered, older ones are assumed superseded. If it
+        isn't reachable, OAuth2 is disabled on every connection that
+        authenticates against it (`OAuth.idp_server` matching its name),
+        since they'd otherwise keep trying - and failing - to fetch tokens/
+        JWKS from an IDP that isn't there. Runs once at startup rather than
+        on every status_monitor() tick, so a still-down IDP doesn't keep
+        re-triggering this (and spamming the log) every interval.
+        """
+        idp_servers = [c for c in self.connections if c.get("type") == "IDP-Server"]
+        if not idp_servers:
+            return
+
+        latest = max(
+            enumerate(idp_servers),
+            key=lambda ic: (ic[1].get("created_at") or "", ic[0]),
+        )[1]
+        await self.check_connection(latest, self.get_client())
+
+        if latest.get("status") == "connected":
+            self.log_event(
+                f"Startup check: IDP-Server '{latest.get('name')}' is active",
+                instance=latest.get("name", ""),
+            )
+            return
+
+        self.log_event(
+            f"Startup check: IDP-Server '{latest.get('name')}' is not reachable - "
+            "disabling OAuth2 on connections that use it",
+            "warn",
+            instance=latest.get("name", ""),
+        )
+        changed = False
+        for con in self.connections:
+            oauth = con.get("OAuth")
+            if (
+                oauth
+                and oauth.get("idp_server") == latest.get("name")
+                and oauth.get("enable_oauth")
+            ):
+                oauth["enable_oauth"] = False
+                changed = True
+                self.log_event(
+                    f"Disabled OAuth2 on '{con.get('name')}' "
+                    f"(IDP-Server '{latest.get('name')}' unreachable)",
+                    "warn",
+                    instance=con.get("name", ""),
+                )
+
+        if changed:
+            self.save_connections()

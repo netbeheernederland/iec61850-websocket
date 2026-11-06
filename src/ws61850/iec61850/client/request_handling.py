@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,22 +15,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 def create_token_refresh(associate_id, token):
     """
     Creates a tokenRefresh message
     """
     return (
         "associate",
-        (
-            "service",
-            (
-                "refreshToken",
-                {
-                    "associateId": associate_id,
-                    "token": token
-                }
-            )
-        )
+        ("service", ("refreshToken", {"associateId": associate_id, "token": token})),
     )
 
 
@@ -44,12 +36,9 @@ def create_tpaa_associate_request(called_ap, max_message_size):
             "service",  # AssociateType CHOICE
             (
                 "associateRequest",  # AssociateServiceType CHOICE
-                {
-                    "calledAP": called_ap,
-                    "maxMessageSize": max_message_size
-                }
-            )
-        )
+                {"calledAP": called_ap, "maxMessageSize": max_message_size},
+            ),
+        ),
     )
 
 
@@ -65,11 +54,11 @@ def create_tpaa_release_request(invoke_id, associate_id):
                 "releaseRequest",  # AssociateServiceType CHOICE
                 {
                     "invokeId": invoke_id,
-                    "associateId": associate_id
+                    "associateId": associate_id,
                     # Add more fields if required
-                }
-            )
-        )
+                },
+            ),
+        ),
     )
 
 
@@ -85,15 +74,15 @@ def create_tpaa_abort_request(invoke_id, associate_id):
                 "abortRequest",  # AssociateServiceType CHOICE
                 {
                     "invokeId": invoke_id,
-                    "associateId": associate_id
+                    "associateId": associate_id,
                     # Add more fields if required
-                }
-            )
-        )
+                },
+            ),
+        ),
     )
 
 
-def create_tpaa_request_getServerDirectory(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_server_directory(invoke_id, associate_id, service_data):
     """
     Creates a Two-Party Application Association request to retrieve information about the server's directory structure.
     """
@@ -102,17 +91,12 @@ def create_tpaa_request_getServerDirectory(invoke_id, associate_id, service_data
         {
             "invokeId": invoke_id,
             "associateId": associate_id,
-            "service": (
-                "getServerDirectory",
-                {
-                    "objectClass": service_data
-                }
-            )
-        }
+            "service": ("getServerDirectory", {"objectClass": service_data}),
+        },
     )
 
 
-def create_tpaa_request_getLDDirectory(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_ld_directory(invoke_id, associate_id, service_data):
     """
     Creates a Two-Party Application Association request to retrieve the list of logical nodes contained within a specific logical device.
     """
@@ -121,17 +105,14 @@ def create_tpaa_request_getLDDirectory(invoke_id, associate_id, service_data):
         {
             "invokeId": invoke_id,
             "associateId": associate_id,
-            "service": (
-                "getLogicalDeviceDirectory",
-                {
-                    "ldName": service_data
-                }
-            )
-        }
+            "service": ("getLogicalDeviceDirectory", {"ldName": service_data}),
+        },
     )
 
 
-def create_tpaa_request_getDataSetDirectoryRequest(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_data_set_directory_request(
+    invoke_id, associate_id, service_data
+):
     """
     Creates a Two-Party Application Association request to retrieve the list of data attributes contained within a specific data set.
     """
@@ -140,17 +121,17 @@ def create_tpaa_request_getDataSetDirectoryRequest(invoke_id, associate_id, serv
         {
             "invokeId": invoke_id,
             "associateId": associate_id,
-            "service": (
-                "getDataSetDirectory",
-                {
-                    "dsRef": service_data
-                }
-            )
-        }
+            "service": ("getDataSetDirectory", {"dsRef": service_data}),
+        },
     )
 
 
-def create_tpaa_request_getLogicalNodeDirectory(invoke_id, associate_id, service_data, aCSIClass):
+def create_tpaa_request_get_logical_node_directory(
+    invoke_id,
+    associate_id,
+    service_data,
+    aCSIClass,  # noqa: N803 - matches the ASN.1 grammar's own field name
+):
     """
     Creates a Two-Party Application Association request to retrieve the list of objects within a specific logical node.
     """
@@ -161,16 +142,13 @@ def create_tpaa_request_getLogicalNodeDirectory(invoke_id, associate_id, service
             "associateId": associate_id,
             "service": (
                 "getLogicalNodeDirectory",
-                {
-                    "lnRef": service_data,
-                    "aCSIClass": aCSIClass
-                }
-            )
-        }
+                {"lnRef": service_data, "aCSIClass": aCSIClass},
+            ),
+        },
     )
 
 
-def create_tpaa_request_getDataDirectory(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_data_directory(invoke_id, associate_id, service_data):
     """
     Creates a Two-Party Application Association request to retrieve the list of components within an object.
     """
@@ -183,13 +161,13 @@ def create_tpaa_request_getDataDirectory(invoke_id, associate_id, service_data):
                 "getDataDirectory",
                 {
                     "dataRef": service_data,
-                }
-            )
-        }
+                },
+            ),
+        },
     )
 
 
-def create_tpaa_request_getBRCBValuesRequest(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_brcb_values_request(invoke_id, associate_id, service_data):
     """
     Creates a Two-Party Application Association request to retrieve the current values of a Buffered Report Control Block (BRCB).
     """
@@ -202,13 +180,13 @@ def create_tpaa_request_getBRCBValuesRequest(invoke_id, associate_id, service_da
                 "getBRCBValues",
                 {
                     "brcbRef": service_data,
-                }
-            )
-        }
+                },
+            ),
+        },
     )
 
 
-def create_tpaa_request_getURCBValuesRequest(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_urcb_values_request(invoke_id, associate_id, service_data):
     """
     Creates a Two-Party Application Association request to retrieve the current values of an Unbuffered Report Control Block (URCB).
     """
@@ -221,13 +199,15 @@ def create_tpaa_request_getURCBValuesRequest(invoke_id, associate_id, service_da
                 "getURCBValues",
                 {
                     "urcbRef": service_data,
-                }
-            )
-        }
+                },
+            ),
+        },
     )
 
 
-def create_tpaa_request_setBRCBValuesRequest(invoke_id, associate_id, client_report_control):
+def create_tpaa_request_set_brcb_values_request(
+    invoke_id, associate_id, client_report_control
+):
     """
     Creates a Two-Party Application Association request to retrieve the current values of a Buffered Report Control Block (BRCB).
     """
@@ -262,15 +242,14 @@ def create_tpaa_request_setBRCBValuesRequest(invoke_id, associate_id, client_rep
         {
             "invokeId": invoke_id,
             "associateId": associate_id,
-            "service": (
-                "setBRCBValues",
-                service_data
-            )
-        }
+            "service": ("setBRCBValues", service_data),
+        },
     )
 
 
-def create_tpaa_request_setURCBValuesRequest(invoke_id, associate_id, client_report_control):
+def create_tpaa_request_set_urcb_values_request(
+    invoke_id, associate_id, client_report_control
+):
     """
     Creates a Two-Party Application Association request to retrieve the current values of a Unbuffered Report Control Block (URCB).
     """
@@ -303,15 +282,12 @@ def create_tpaa_request_setURCBValuesRequest(invoke_id, associate_id, client_rep
         {
             "invokeId": invoke_id,
             "associateId": associate_id,
-            "service": (
-                "setURCBValues",
-                service_data
-            )
-        }
+            "service": ("setURCBValues", service_data),
+        },
     )
 
 
-def create_tpaa_request_getDataDefinition(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_data_definition(invoke_id, associate_id, service_data):
     """
     Creates a Two-Party Application Association request to retrieve the data type definition of a specific object.
     """
@@ -324,13 +300,18 @@ def create_tpaa_request_getDataDefinition(invoke_id, associate_id, service_data)
                 "getDataDefinition",
                 {
                     "dataRef": service_data,
-                }
-            )
-        }
+                },
+            ),
+        },
     )
 
 
-def create_tpaa_request_getDataValues(invoke_id, associate_id, service_data, includeElementName):
+def create_tpaa_request_get_data_values(
+    invoke_id,
+    associate_id,
+    service_data,
+    includeElementName,  # noqa: N803 - matches the ASN.1 grammar's own field name
+):
     """
     Creates a Two-Party Application Association request to retrieve the current values of a specific object.
     """
@@ -341,16 +322,13 @@ def create_tpaa_request_getDataValues(invoke_id, associate_id, service_data, inc
             "associateId": associate_id,
             "service": (
                 "getDataValues",
-                {
-                    "ref": service_data,
-                    "includeElementName": includeElementName
-                }
-            )
-        }
+                {"ref": service_data, "includeElementName": includeElementName},
+            ),
+        },
     )
 
 
-def create_tpaa_request_setDataValues(invoke_id, associate_id, ref, values):
+def create_tpaa_request_set_data_values(invoke_id, associate_id, ref, values):
     """
     Creates a Two-Party Application Association request  to set or update the values of a specific data attribute.
     """
@@ -359,18 +337,12 @@ def create_tpaa_request_setDataValues(invoke_id, associate_id, ref, values):
         {
             "invokeId": invoke_id,
             "associateId": associate_id,
-            "service": (
-                "setDataValues",
-                {
-                    "ref": ref,
-                    "dataAttrVal": values
-                }
-            )
-        }
+            "service": ("setDataValues", {"ref": ref, "dataAttrVal": values}),
+        },
     )
 
 
-def create_tpaa_request_getDataSetValues(invoke_id, associate_id, service_data):
+def create_tpaa_request_get_data_set_values(invoke_id, associate_id, service_data):
     """
     Create a Two-Party Application Association request to retrieve the current values of a specific data set.
     """
@@ -383,9 +355,9 @@ def create_tpaa_request_getDataSetValues(invoke_id, associate_id, service_data):
                 "getDatasetValues",
                 {
                     "dsRef": service_data,
-                }
-            )
-        }
+                },
+            ),
+        },
     )
 
 
@@ -402,9 +374,9 @@ def create_tpaa_request_select(invoke_id, associate_id, service_data):
                 "select",
                 {
                     "ref": service_data,
-                }
-            )
-        }
+                },
+            ),
+        },
     )
 
 
@@ -417,11 +389,8 @@ def create_tpaa_request_operate(invoke_id, associate_id, service_data):
         {
             "invokeId": invoke_id,
             "associateId": associate_id,
-            "service": (
-                "operate",
-                service_data
-            )
-        }
+            "service": ("operate", service_data),
+        },
     )
     return return_object
 
@@ -438,11 +407,11 @@ def create_tpaa_release_response(invoke_id, associate_id):
                 "releaseResponse",  # AssociateServiceType CHOICE
                 {
                     "invokeId": invoke_id,
-                    "associateId": associate_id
+                    "associateId": associate_id,
                     # Add more fields if required
-                }
-            )
-        )
+                },
+            ),
+        ),
     )
 
 
@@ -454,12 +423,6 @@ def create_tpaa_abort_response(invoke_id, associate_id):
         "associate",  # TpaaPdu CHOICE
         (
             "service",
-            (
-                "abortResponse",
-                {
-                    "invokeId": invoke_id,
-                    "associateId": associate_id
-                }
-            )
-        )
+            ("abortResponse", {"invokeId": invoke_id, "associateId": associate_id}),
+        ),
     )

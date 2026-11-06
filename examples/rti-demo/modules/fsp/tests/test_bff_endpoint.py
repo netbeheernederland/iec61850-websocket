@@ -1,0 +1,858 @@
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2025-2026 Netbeheer Nederland
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for FSP BFF endpoint routes.
+
+fsp.bff_endpoint is a FastAPI router (create_bff_router), mounted under
+the "/api" prefix - not the Flask blueprint this file originally tested
+against. Routes are flat (e.g. "/api/status", not
+"/api/iec61850server/status").
+"""
+
+from __future__ import annotations
+
+import socket
+import time
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from fsp import bff_endpoint
+
+pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def client_and_server(tmp_path: Path):
+    (tmp_path / "model.py").write_text(
+        "from ws61850.iec61850.data_model.ied_model import IedModel\n"
+        "ied = IedModel(name='TestIED')\n",
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    router, server = bff_endpoint.create_bff_router(tmp_path)
+    app.include_router(router)
+    return TestClient(app), server
+
+
+def test_status_returns_server_status(client_and_server):
+    client, server = client_and_server
+    server.get_status = lambda: {
+        "status": "stopped",
+        "host": "localhost",
+        "port": 8765,
+        "error": None,
+        "connectedClients": 0,
+        "tasks": {},
+        "accessPoints": ["cp1"],
+    }
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"]["status"] == "stopped"
+    assert body["status"]["port"] == 8765
+
+
+def test_status_error_with_quotes_survives_as_json(client_and_server):
+    # Returned as a JSON object, not str(dict): a Python repr of an error
+    # containing quotes (e.g. "Connect call failed ('::1', 8765)") mixes
+    # quote styles, which the HMI's repr-to-JSON conversion couldn't parse -
+    # so the dial-out error never reached the page.
+    client, server = client_and_server
+    error = "Connection failed: Connect call failed ('::1', 8765, 0, 0)"
+    server.get_status = lambda: {"status": "listening", "error": error}
+
+    body = client.get("/api/status").json()
+
+    assert body["status"]["error"] == error
+
+
+def test_start_rejects_unsupported_mode(client_and_server):
+    client, _ = client_and_server
+
+    response = client.post(
+        "/api/start",
+        json={"mode": "passive", "host": "localhost", "port": "8765"},
+    )
+
+    assert response.status_code == 400
+    assert "Only 'active' mode is supported" in response.json()["error"]
+
+
+def test_start_rejects_invalid_port(client_and_server):
+    client, _ = client_and_server
+
+    response = client.post(
+        "/api/start",
+        json={"mode": "active", "host": "localhost", "port": "bad"},
+    )
+
+    assert response.status_code == 400
+    assert "Invalid port value" in response.json()["error"]
+
+
+def test_start_calls_server_and_updates_cp(client_and_server):
+    client, server = client_and_server
+
+    called = {}
+
+    def fake_start(host: str, port: int) -> None:
+        called["host"] = host
+        called["port"] = port
+
+    server.start_server = fake_start
+
+    response = client.post(
+        "/api/start",
+        json={"mode": "active", "host": "127.0.0.1", "port": "9000", "cp": "cp2"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert called == {"host": "127.0.0.1", "port": 9000}
+    assert server.runtime.cp == "cp2"
+
+
+def test_start_applies_stored_tls_before_connecting(client_and_server):
+    # The BFF adds the connection's stored TLS config to /start, so an FSP
+    # restarted since TLS was last configured still dials out over WSS.
+    import ssl
+
+    client, server = client_and_server
+    seen = {}
+    server.start_server = lambda host, port: seen.update(
+        tls=server.runtime.endpoint._tls_config
+    )
+
+    response = client.post(
+        "/api/start",
+        json={
+            "mode": "active",
+            "host": "rti-so",
+            "port": "8765",
+            "cp": "cp1",
+            "enable_tls": True,
+            "tls_version": "TLSv1_3",
+            "server_ca": "CA-PEM",
+        },
+    )
+
+    assert response.status_code == 200
+    tls = seen["tls"]
+    assert tls.mode == "client"
+    assert tls.cafile == "CA-PEM"
+    assert tls.min_version == tls.max_version == ssl.TLSVersion.TLSv1_3
+
+
+def test_start_with_tls_disabled_clears_previous_tls(client_and_server):
+    client, server = client_and_server
+    server.runtime.endpoint._tls_config = object()
+    server.start_server = lambda host, port: None
+
+    client.post(
+        "/api/start",
+        json={
+            "mode": "active",
+            "host": "rti-so",
+            "port": "8765",
+            "cp": "cp1",
+            "enable_tls": False,
+        },
+    )
+
+    assert server.runtime.endpoint._tls_config is None
+
+
+def test_start_without_tls_fields_leaves_tls_untouched(client_and_server):
+    client, server = client_and_server
+    existing = object()
+    server.runtime.endpoint._tls_config = existing
+    server.start_server = lambda host, port: None
+
+    client.post(
+        "/api/start",
+        json={"mode": "active", "host": "rti-so", "port": "8765", "cp": "cp1"},
+    )
+
+    assert server.runtime.endpoint._tls_config is existing
+
+
+OAUTH = {
+    "enable_oauth": True,
+    "token_endpoint_url": "https://keycloak:8443/realms/r/protocol/openid-connect/token",
+    "client_id": "ws-client",
+    "client_secret": "s3cret",
+    "ca_certificate": "CA-PEM",
+    "enable_token_refresh": True,
+}
+
+
+def test_start_keeps_stored_oauth_for_the_dial_out(client_and_server):
+    # The BFF adds the connection's stored OAuth config to /start, so the
+    # FSP fetches its token before it dials - not a first attempt without one.
+    client, server = client_and_server
+    seen = {}
+    server.start_server = lambda host, port: seen.update(
+        oauth=server.runtime.start_oauth
+    )
+
+    response = client.post(
+        "/api/start",
+        json={"mode": "active", "host": "rti-so", "port": "8765", "cp": "cp1", **OAUTH},
+    )
+
+    assert response.status_code == 200
+    assert seen["oauth"] == {
+        "token_endpoint": OAUTH["token_endpoint_url"],
+        "client_id": "ws-client",
+        "client_secret": "s3cret",
+        "kc_cert": "CA-PEM",
+        "enable_token_refresh": True,
+    }
+
+
+def test_start_with_oauth_but_no_token_endpoint_is_refused(client_and_server):
+    client, server = client_and_server
+    started = []
+    server.start_server = lambda host, port: started.append(host)
+
+    response = client.post(
+        "/api/start",
+        json={"mode": "active", "host": "rti-so", "port": "8765", "enable_oauth": True},
+    )
+
+    assert response.status_code == 400
+    assert "token_endpoint" in response.json()["error"]
+    assert started == []
+
+
+def test_start_with_oauth_disabled_clears_previous_oauth(client_and_server):
+    client, server = client_and_server
+    server.runtime.start_oauth = {"token_endpoint": "old"}
+    endpoint = server.runtime.endpoint
+    endpoint._oauth_enable = True
+    endpoint._access_token = "old-token"
+    server.start_server = lambda host, port: None
+
+    client.post(
+        "/api/start",
+        json={
+            "mode": "active",
+            "host": "rti-so",
+            "port": "8765",
+            "enable_oauth": False,
+        },
+    )
+
+    assert server.runtime.start_oauth is None
+    assert endpoint._oauth_enable is False
+    assert endpoint._access_token is None
+
+
+def test_start_without_oauth_fields_leaves_oauth_untouched(client_and_server):
+    client, server = client_and_server
+    kept = {"token_endpoint": "kept"}
+    server.runtime.start_oauth = kept
+    server.start_server = lambda host, port: None
+
+    client.post("/api/start", json={"mode": "active", "host": "rti-so", "port": "8765"})
+
+    assert server.runtime.start_oauth is kept
+
+
+def test_reconfig_oauth_off_while_stopped_also_clears_the_start_oauth(
+    client_and_server,
+):
+    # Otherwise a later bare /start would turn OAuth back on.
+    client, server = client_and_server
+    server.runtime.start_oauth = {"token_endpoint": "old"}
+
+    response = client.post(
+        "/api/reconfig-oauth",
+        json={
+            "connection_name": "FSP01",
+            "enable_oauth": False,
+            "host": "rti-so",
+            "port": "8765",
+            "cp": "cp1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert server.runtime.start_oauth is None
+
+
+def test_dial_out_fetches_the_token_before_connecting(client_and_server):
+    import asyncio
+
+    _, server = client_and_server
+    calls = []
+
+    class FakeEndpoint:
+        _connect_task = None
+
+        async def reconfigure_oauth(self, host, port, cp, oauth_enable, **kwargs):
+            calls.append(("reconfigure_oauth", host, port, cp, oauth_enable, kwargs))
+            self._connect_task = "oauth-task"
+
+        def run_in_background(self, host, port, cp):
+            calls.append(("run_in_background", host, port, cp))
+            return "plain-task"
+
+    server.runtime.endpoint = FakeEndpoint()
+    server.runtime.start_oauth = {
+        "token_endpoint": "T",
+        "client_id": "C",
+        "client_secret": "S",
+        "kc_cert": None,
+        "enable_token_refresh": False,
+    }
+    assert asyncio.run(server._start_dial_out("rti-so", 8765, "cp1")) == "oauth-task"
+    assert calls == [
+        (
+            "reconfigure_oauth",
+            "rti-so",
+            "8765",
+            "cp1",
+            True,
+            {
+                "token_endpoint": "T",
+                "client_id": "C",
+                "client_secret": "S",
+                "kc_cert": None,
+                "enable_token_refresh": False,
+            },
+        )
+    ]
+
+    calls.clear()
+    server.runtime.start_oauth = None
+    assert asyncio.run(server._start_dial_out("rti-so", 8765, "cp1")) == "plain-task"
+    assert calls == [("run_in_background", "rti-so", 8765, "cp1")]
+
+
+def test_stop_returns_stopped_when_already_stopped(client_and_server):
+    client, server = client_and_server
+    server.runtime.status = "stopped"
+
+    response = client.post("/api/stop")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "status": "stopped"}
+
+
+def test_readvalue_requires_objref(client_and_server):
+    client, server = client_and_server
+    server.runtime.server = object()
+
+    # objRef is a required field on ReadvalueRequest, so omitting it entirely
+    # is rejected by FastAPI's own request validation (422) before the
+    # handler runs - send an empty string instead, which is schema-valid and
+    # actually exercises the handler's own `if not obj_ref` check below.
+    response = client.post("/api/readvalue", json={"objRef": "", "fc": "mx"})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "objRef is required"
+
+
+def test_readvalue_rejects_when_server_not_running(client_and_server):
+    client, server = client_and_server
+    server.runtime.server = None
+
+    response = client.post("/api/readvalue", json={"objRef": "LD0/LLN0.Mod.stVal"})
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "Server is not running"
+
+
+def test_readvalue_success_wraps_single_value(client_and_server):
+    client, server = client_and_server
+    server.runtime.server = object()
+    server.read_value = lambda _obj_ref: {"type": "boolean", "value": True}
+
+    response = client.post(
+        "/api/readvalue",
+        json={"objRef": "LD0/LLN0.Mod.stVal", "fc": "st"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["success"] is True
+    # Unlike the client-side (SO) readvalue route, the server side returns
+    # the single value dict directly under "values", not wrapped in a list.
+    assert body["values"] == {"type": "boolean", "value": True}
+
+
+def test_writevalue_requires_value(client_and_server):
+    client, server = client_and_server
+    server.runtime.server = object()
+
+    # WritevalueRequest.value is a required, non-nullable `str` field, so a
+    # request missing it is rejected by FastAPI's own request validation
+    # (422) before the handler's own `if value is None` check can run - that
+    # check is unreachable through the API as currently typed. This asserts
+    # the actual current behavior: still rejected, just at the request-
+    # validation layer rather than with the handler's custom error message.
+    response = client.post(
+        "/api/writevalue",
+        json={"objRef": "LD0/LLN0.Mod.stVal", "fc": "st"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_writevalue_success_response(client_and_server):
+    client, server = client_and_server
+    server.runtime.server = object()
+
+    def fake_write(obj_ref: str, value, data_type: str = "unknown"):
+        return {
+            "objRef": obj_ref,
+            "value": value,
+            "dataType": data_type,
+        }
+
+    server.write_value = fake_write
+
+    response = client.post(
+        "/api/writevalue",
+        # value is typed as `str` on WritevalueRequest ("value to write as
+        # string representation") - pydantic v2 doesn't coerce an int here.
+        json={
+            "objRef": "LD0/LLN0.Mod.stVal",
+            "fc": "st",
+            "value": "1",
+            "dataType": "int32",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["success"] is True
+    assert body["objRef"] == "LD0/LLN0.Mod.stVal"
+    assert body["value"] == "1"
+    assert body["dataType"] == "int32"
+
+
+def test_update_iedmodel_requires_model_py(client_and_server):
+    client, _ = client_and_server
+
+    response = client.post("/api/update-iedmodel", json={"modelPy": ""})
+
+    assert response.status_code == 400
+    assert "modelPy is required" in response.json()["error"]
+
+
+def test_update_iedmodel_success(client_and_server):
+    client, server = client_and_server
+
+    class _FakeIed:
+        name = "UpdatedIED"
+
+    server.update_model_file = lambda _content, apply_dynamically=True: _FakeIed()
+
+    response = client.post(
+        "/api/update-iedmodel",
+        json={
+            "modelPy": "from ws61850.iec61850.data_model.ied_model import IedModel\nied = IedModel(name='UpdatedIED')\n"
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["ied"] == "UpdatedIED"
+
+
+def test_connections_returns_server_info_when_no_clients(client_and_server):
+    client, server = client_and_server
+    server.runtime.endpoint = None
+
+    response = client.get("/api/connections")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["role"] == "ACSI-Server"
+    assert body["ws_mode"] == "active"
+    assert body["connected_servers"] == 0
+    assert body["connections"] == []
+
+
+def test_connections_extracts_client_tpa_info(client_and_server):
+    client, server = client_and_server
+
+    class _FakeWebSocketInfo:
+        def __init__(self):
+            self.remote_address = ("192.168.1.100", 54321)
+
+    class _FakeEndpoint:
+        pass
+
+    fake_endpoint = _FakeEndpoint()
+    fake_endpoint.websocket_info_list = [_FakeWebSocketInfo()]
+    server.runtime.endpoint = fake_endpoint
+
+    response = client.get("/api/connections")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["connected_servers"] == 1
+    assert len(body["connections"]) == 1
+
+    conn = body["connections"][0]
+    assert conn["peer_address"] == "192.168.1.100"
+    assert conn["peer_port"] == 54321
+    assert conn["role"] == "ACSI-Server"
+    assert conn["ws_mode"] == "active"
+    assert conn["status"] == "active"
+
+
+def test_connections_marks_disconnected_clients(client_and_server):
+    client, server = client_and_server
+
+    class _FakeWebSocketInfo:
+        def __init__(self, connected=True):
+            self.remote_address = ("192.168.1.100", 54321)
+            self.connected = connected
+
+    class _FakeEndpoint:
+        pass
+
+    fake_endpoint = _FakeEndpoint()
+    fake_endpoint.websocket_info_list = [
+        _FakeWebSocketInfo(connected=True),
+        _FakeWebSocketInfo(connected=False),
+    ]
+
+    server.runtime.endpoint = fake_endpoint
+    response = client.get("/api/connections")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connected_servers"] == 2
+
+    assert body["connections"][0]["status"] == "active"
+    assert body["connections"][1]["status"] == "disconnected"
+
+
+def test_apis_lists_registered_routes(client_and_server):
+    """Regression test: route.path on a route added through a prefixed
+    APIRouter (here, prefix="/api") is already the full path, so this
+    handler's `f"/api{route.path}"` used to double it into
+    "/api/api/status" etc. instead of listing the real paths."""
+    client, _ = client_and_server
+
+    response = client.get("/api/apis")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["count"] > 0
+    paths = {e["path"] for e in body["endpoints"]}
+    assert "/api/status" in paths
+    assert "/api/readvalue" in paths
+
+
+def test_fsp_properties(client_and_server):
+    """GET /api/properties should return the FSP's fixed role/ws_mode."""
+    client, _ = client_and_server
+
+    response = client.get("/api/properties")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["acsi_role"] == "ACSI-Server"
+    assert body["ws_mode"] == "Active"
+
+
+def test_reconfig_while_stopped_saves_tls_without_connecting(client_and_server):
+    # After a Disconnect, saving TLS settings must not dial out on its own -
+    # they apply on the next Connect instead.
+    client, server = client_and_server
+    started = []
+    server.start_server = lambda host, port: started.append((host, port))
+
+    response = client.post(
+        "/api/reconfig-connection",
+        json={
+            "host": "rti-so",
+            "port": "8765",
+            "connection_name": "FSP01",
+            "enable_tls": True,
+            "tls_version": "TLSv1_3",
+            "server_ca": "CA-PEM",
+            "ws_mode": "active",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "saved"
+    assert started == []
+    assert server.runtime.endpoint._tls_config.cafile == "CA-PEM"
+
+
+def _oauth_body(enable_oauth):
+    return {
+        "connection_name": "FSP01",
+        "enable_oauth": enable_oauth,
+        "host": "rti-so",
+        "port": "8765",
+        "cp": "cp1",
+        "ws_mode": "active",
+        "token_endpoint_url": "http://keycloak:8080/realms/r/protocol/openid-connect/token",
+        "client_id": "ws-client",
+        "client_secret": "s3cret",
+    }
+
+
+def test_reconfig_oauth_off_while_stopped_clears_oauth_without_connecting(
+    client_and_server,
+):
+    # Turning OAuth off after a Disconnect must actually turn it off (it used
+    # to only be saved in the BFF, so /oauth-status kept reporting it on) -
+    # without dialing out.
+    client, server = client_and_server
+    started = []
+    server.start_server = lambda host, port: started.append((host, port))
+    endpoint = server.runtime.endpoint
+    endpoint._oauth_enable = True
+    endpoint._access_token = "stale-token"
+    endpoint._assoc_handler._token_endpoint = "http://keycloak:8080/token"
+
+    response = client.post("/api/reconfig-oauth", json=_oauth_body(False))
+
+    assert response.json()["status"] == "saved"
+    assert started == []
+    assert endpoint._oauth_enable is False
+    assert endpoint._access_token is None
+    assert endpoint._assoc_handler._token_endpoint is None
+    assert client.get("/api/oauth-status").json()["enable_oauth"] is False
+
+
+def test_reconfig_oauth_on_while_stopped_waits_for_connect(client_and_server):
+    client, server = client_and_server
+    started = []
+    server.start_server = lambda host, port: started.append((host, port))
+
+    response = client.post("/api/reconfig-oauth", json=_oauth_body(True))
+
+    assert response.json()["status"] == "saved"
+    assert started == []
+
+
+def test_the_router_takes_no_scl_path():
+    import inspect
+
+    assert (
+        "scl_default_path"
+        not in inspect.signature(bff_endpoint.create_bff_router).parameters
+    )
+
+
+class FakeServer:
+    def __init__(self, raises=None):
+        self.raises = raises
+        self.starts = []
+        self.logged = []
+
+    def start_server(self, host=None, port=None):
+        if self.raises:
+            raise self.raises
+        self.starts.append((host, port))
+
+    def _log_action(self, message, level, kind=None):
+        self.logged.append((level, message))
+
+
+class TestAutostart:
+    """The ACSI server starts with the service; connecting is its own option
+    (decision 0033)."""
+
+    @pytest.fixture(autouse=True)
+    def clean_environment(self, monkeypatch):
+        for var in ("FSP_AUTOSTART", "FSP_AUTOCONNECT", "FSP_SO_HOST", "FSP_SO_PORT"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_starts_the_server_without_connecting_by_default(self):
+        server = FakeServer()
+        bff_endpoint._autostart(server)
+        assert server.starts == [(None, None)]
+
+    @pytest.mark.parametrize("value", ["false", "0", "no", "off", "False"])
+    def test_can_be_switched_off(self, monkeypatch, value):
+        monkeypatch.setenv("FSP_AUTOSTART", value)
+        monkeypatch.setenv("FSP_AUTOCONNECT", "true")
+        server = FakeServer()
+        bff_endpoint._autostart(server)
+        assert server.starts == []
+
+    def test_autoconnect_dials_localhost_8765_by_default(self, monkeypatch):
+        monkeypatch.setenv("FSP_AUTOCONNECT", "true")
+        server = FakeServer()
+        bff_endpoint._autostart(server)
+        assert server.starts == [("localhost", 8765)]
+
+    def test_autoconnect_host_and_port_from_environment(self, monkeypatch):
+        monkeypatch.setenv("FSP_AUTOCONNECT", "true")
+        monkeypatch.setenv("FSP_SO_HOST", "rti-so")
+        monkeypatch.setenv("FSP_SO_PORT", "9765")
+        server = FakeServer()
+        bff_endpoint._autostart(server)
+        assert server.starts == [("rti-so", 9765)]
+
+    @pytest.mark.parametrize(
+        "error", [RuntimeError("Server is already running"), PermissionError("80")]
+    )
+    def test_a_failed_start_is_logged_not_raised(self, error):
+        server = FakeServer(raises=error)
+        bff_endpoint._autostart(server)
+        assert any(level == "warn" and str(error) in m for level, m in server.logged)
+
+    def test_a_bad_port_is_logged_not_raised(self, monkeypatch):
+        monkeypatch.setenv("FSP_AUTOCONNECT", "true")
+        monkeypatch.setenv("FSP_SO_PORT", "so")
+        server = FakeServer()
+        bff_endpoint._autostart(server)
+        assert server.starts == []
+        assert server.logged[0][0] == "warn"
+
+    def test_the_app_starts_the_server_after_its_plugins(self, monkeypatch, tmp_path):
+        (tmp_path / "model.py").write_text(MODEL, encoding="utf-8")
+        monkeypatch.setenv("MODEL_PATH", str(tmp_path))
+        order = []
+
+        class Service(bff_endpoint.PluginService):
+            async def startup(self):
+                order.append("plugins")
+
+        monkeypatch.setattr(
+            bff_endpoint, "plugin_service", Service(bff_endpoint.plugin_host)
+        )
+        monkeypatch.setattr(bff_endpoint, "_autostart", order.append)
+        app = bff_endpoint.create_fastapi_app()
+        with TestClient(app):
+            pass
+        assert order == ["plugins", app.state.server]
+
+
+MODEL = (
+    "from ws61850.iec61850.data_model.ied_model import IedModel\n"
+    "ied = IedModel(name='TestIED')\n"
+)
+
+
+def _wait_for(server, status):
+    for _ in range(100):
+        if server.runtime.status == status:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"{server.runtime.status} != {status}")
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class TestReadyServer:
+    """A server started without the SO is ready: it serves its model, and
+    /start only dials out."""
+
+    @pytest.fixture
+    def server(self, client_and_server):
+        _, server = client_and_server
+        yield server
+        server.stop_server()
+
+    def test_ready_then_connected(self, client_and_server, server):
+        client, _ = client_and_server
+        server.start_server()
+        _wait_for(server, "ready")
+        assert "ws" not in server.runtime.tasks
+        assert server.runtime.loop.is_running()  # writes are taken
+
+        port = _free_port()  # nothing there: the dial-out keeps trying
+        response = client.post(
+            "/api/start",
+            json={"host": "127.0.0.1", "port": str(port), "mode": "active"},
+        )
+        assert response.json()["status"] == "listening"
+        assert server.runtime.status == "listening"
+        assert (server.runtime.host, server.runtime.port) == ("127.0.0.1", port)
+        assert not server.runtime.tasks["ws"].done()
+
+        again = client.post(
+            "/api/start",
+            json={"host": "127.0.0.1", "port": str(port), "mode": "active"},
+        )
+        assert "already running" in again.json()["error"]
+
+    def test_a_ready_server_is_started_once(self, server):
+        server.start_server()
+        _wait_for(server, "ready")
+        with pytest.raises(RuntimeError, match="already running"):
+            server.start_server()
+
+    def test_stop_stops_a_ready_server(self, server):
+        server.start_server()
+        _wait_for(server, "ready")
+        server.stop_server()
+        _wait_for(server, "stopped")
+
+    def test_disconnect_leaves_the_server_ready(self, client_and_server, server):
+        client, _ = client_and_server
+        start = {"host": "127.0.0.1", "port": str(_free_port()), "mode": "active"}
+        server.start_server()
+        _wait_for(server, "ready")
+        client.post("/api/start", json=start)
+        ws = server.runtime.tasks["ws"]
+
+        response = client.post("/api/stop")
+        assert response.json() == {"ok": True, "status": "ready"}
+        assert server.runtime.status == "ready"
+        assert ws.cancelled() and "ws" not in server.runtime.tasks
+        assert server.runtime.endpoint._connect_task is None
+        assert not server.runtime.tasks["report"].done()
+        assert server.runtime.loop.is_running()  # writes are still taken
+
+        assert client.post("/api/start", json=start).json()["status"] == "listening"
+        assert not server.runtime.tasks["ws"].done()
+
+    def test_a_server_started_by_connect_is_left_ready(self, client_and_server, server):
+        client, _ = client_and_server
+        start = {"host": "127.0.0.1", "port": str(_free_port()), "mode": "active"}
+        client.post("/api/start", json=start)
+        _wait_for(server, "listening")
+        client.post("/api/stop")
+        assert server.runtime.status == "ready"
+
+    def test_disconnect_on_a_ready_server_does_nothing(self, client_and_server, server):
+        client, _ = client_and_server
+        server.start_server()
+        _wait_for(server, "ready")
+        assert client.post("/api/stop").json() == {"ok": True, "status": "ready"}
+        assert server.runtime.status == "ready"

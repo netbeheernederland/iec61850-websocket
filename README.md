@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # IEC 61850 WebSocket Proof-of-Concept
 
 ⚠️ **Project status:**  
@@ -45,22 +51,30 @@ IEC 61850 is powerful but traditionally bound to MMS/TCP, and this PoC shows how
 
 ## High-level architecture
 
-**Flow:**
+Two parties exchange IEC 61850 ACSI services over a WebSocket. Either party can be the WebSocket server, independent of
+which one holds the data model:
 
-1. IEC 61850 source
-    - Simulated Logical Nodes *or*
-    - Real device / gateway *or*
-    - Recorded data (PCAP / JSON)
+```
+IEC61850Client  <-- ACSI services, reports -->  IEC61850Server
+      |                                                |
+  endpoint (PassiveEndpoint = WebSocket server, ActiveEndpoint = WebSocket client)
+      |                                                |
+  TPAA association, OAuth 2.0 bearer tokens, TLS
+      |                                                |
+  ASN.1 messages, JSON (JER) or BER encoded  <== WebSocket ==>
+```
 
-2. Python backend
-    - Reads / produces IEC 61850-like data
-    - Normalizes it into a simple internal model
-    - Publishes updates via WebSockets
+- `ws61850.endpoint` runs the WebSocket side and the TPAA association; `is_direct` says who starts it (see
+  [docs/architecture/endpoint-architecture.md](docs/architecture/endpoint-architecture.md)).
+- `ws61850.iec61850` holds the IEC 61850 client and server and the IED data model (see
+  [docs/architecture/data-model-architecture.md](docs/architecture/data-model-architecture.md)).
+- `ws61850.asn1` and `ws61850.protocol` encode and decode the messages defined by the ASN.1 schema.
+- The RTI demo in `examples/rti-demo` builds a complete system on top: RTI-FSP (IEC 61850 server), RTI-SO (IEC 61850
+  client), a BFF, and a React HMI. Plugins in `examples/rti-plugins` connect to the FSPs and SO over HTTP: dr_leds
+  (two simulated LEDs, the default) and dr_panel (a Raspberry Pi's LEDs, buttons, potentiometers, and displays). Its
+  [system overview](docs/rti-demo/README.md) has the diagrams of each part.
 
-3. WebSocket clients
-    - Browser UI
-    - Monitoring tools
-    - Other backend services
+![RTI demo system architecture overview](docs/rti-demo/images/RTI_Demo_System_Architecture_Overview.png)
 
 ---
 
@@ -68,28 +82,33 @@ IEC 61850 is powerful but traditionally bound to MMS/TCP, and this PoC shows how
 
 ```
 iec61850-websocket/
-├─ pyproject.toml
-├─ README.md
-├─ src/
-│  └─ ws61850/
-│     ├─ iec61850/                 # Client/server logic and IEC 61850 data model helpers
-│     │  ├─ client/                # IEC 61850 WebSocket client implementations
-│     │  ├─ server/                # IEC 61850 WebSocket server implementations
-│     │  ├─ data_model/            # IEC 61850 data model abstractions and helpers
-│     ├─ endpoint/                 # WebSocket endpoint implementation
-│     ├─ security/
-│     │  ├─ tls.py                 # TLS configuration container and helpers
-│     │  └─ oauth.py               # OAuth utilities for client identification
-│     └─ asn1/                     # ASN.1 schema, encode/decode, formatters, and tests
-├─ tests/                          # Functional and performance-oriented test suites
-│  ├─ unit/                        # Unit-level tests (in progress)
-│  ├─ integration/                 # Integration and protocol-level tests
-│  ├─ performance/                 # Performance and load tests
-│  └─ security/                    # Security tests
-├─ examples/                       # Example clients/servers and interactive demos
-├─ docs/                           # Generated and hand-written documentation (e.g. Doxygen, specs)
-│  └─ protocol_specification/      # IEC61850 WebSocket protocol specification
-└─ scripts/                        # Helper scripts (setup, tooling, test helpers)
+├─ pyproject.toml, uv.lock         # uv workspace: ws61850 plus the rti-demo bff, fsp, so, plugins and common modules
+├─ src/ws61850/
+│  ├─ endpoint/                    # PassiveEndpoint / ActiveEndpoint, association handling, routing
+│  ├─ transport/                   # WebSocket transport, reconnect policy, sessions, auth strategies
+│  ├─ iec61850/
+│  │  ├─ client/                   # IEC61850Client
+│  │  ├─ server/                   # IEC61850Server, control and report handling
+│  │  ├─ services/                 # ACSI services: directory, data access, control, reports
+│  │  └─ data_model/               # IED model classes, builders, JSON loader, CDC registry
+│  ├─ protocol/                    # message types, factory and codec shared by client and server
+│  ├─ asn1/                        # ASN.1 schema and encode/decode
+│  ├─ security/                    # TLS configuration, OAuth 2.0 (tokens, JWKS, JWT validation)
+│  └─ shared/                      # errors, references, tree rendering
+├─ tests/
+│  ├─ unit/                        # unit tests (pytest), run in CI
+│  ├─ integration/                 # FT1-FT8 functional scenarios
+│  ├─ performance/                 # FT20-FT23 encoding, multiple clients, OAuth + TLS
+│  └─ security/                    # FT30-FT31 TLS and OAuth
+├─ testing/                        # test support: certificates, IED models, helpers
+├─ examples/                       # library examples, the RTI demo and its plugins (see examples/README.md)
+│  ├─ rti-demo/                    # RTI-FSP, RTI-SO, BFF, HMI and the plugin host
+│  └─ rti-plugins/                 # dr_leds and dr_panel, each its own uv project and image
+├─ docs/                           # getting started, architecture, protocol specification, the RTI demo's
+│                                  # overview, design and decisions (see docs/README.md)
+└─ scripts/
+   ├─ keycloak/                    # Keycloak (IDP-Server) for the OAuth scenarios
+   └─ smoke-test.sh                # the first-run check of docs/getting-started.md, also run in CI
 ```
 
 ---
@@ -99,11 +118,15 @@ iec61850-websocket/
 ### Prerequisites
 
 - **UV** - [Install UV](https://docs.astral.sh/uv/getting-started/installation/)
-- **Python 3.10-3.12** (3.12 recommended) - [Download Python](https://www.python.org/downloads/)
+- **Python 3.13** or newer (3.13 is pinned in `.python-version`; `uv python install 3.13` installs it) -
+  [Download Python](https://www.python.org/downloads/), or use a package
+  manager like `apt`, `brew`, or `chocolatey`. A system Python also needs its development headers (`python3-dev`).
 - **Git** - [Install Git](https://git-scm.com/downloads)
 - **Docker** - [Install Docker](https://docs.docker.com/get-docker/)
 - **Docker Compose** - [Install Docker Compose](https://docs.docker.com/compose/install/)
 - **cfssl** - [Install cfssl](https://github.com/cloudflare/cfssl/releases) – used for TLS certificate generation
+- **Node.js 26** with npm - [Install Node.js](https://nodejs.org/en/download) – only for the rti-demo's HMI (CI and its
+  Docker image use 26.9.0)
 - **doxygen** - [Install doxygen](https://www.doxygen.nl) - used to generate documentation (optional)
 
 - Basic understanding of:
@@ -115,27 +138,39 @@ iec61850-websocket/
 
 ### Setup environment
 
+If the prerequisites are already installed, the environment can be set up using the following commands:
+
 ```shell
-# Clone the repository
 # 1. Clone and enter the project
-git clone https://github.com/Netbeheer-Nederland/iec61850-websocket.git
+git clone https://github.com/netbeheernederland/iec61850-websocket.git
 cd iec61850-websocket
 ```
 
 ```bash
-# 2. Create and activate a virtual environment
+# 2. Create the virtual environment and install the dependencies,
+#    including the rti-demo's bff, fsp, so, plugins and common modules
 uv venv
-uv sync
+uv sync --all-packages
 ```
 
-```bash
-# 3. Build the project
-uv build
-```
+Optionally, `uv build` builds the `iec61850-websocket` wheel and source archive into `dist/` (CI checks that it builds; nothing
+else needs it).
+
+For a more detailed setup see [docs/getting-started.md](docs/getting-started.md).
 
 ---
 
 ## Running tests
+
+The unit tests run in CI and are the quickest check that everything works:
+
+```bash
+uv run pytest tests/unit -q
+scripts/smoke-test.sh          # an example server and client associate and exchange a directory request
+```
+
+The RTI demo's modules and plugins have their own tests; [examples/rti-demo/TESTING.md](examples/rti-demo/TESTING.md)
+lists how to run each.
 
 The functional and performance scenarios in `tests/` are intended to be run from the repository root with `uv`.
 Start by installing dependencies with `uv sync`, then open the markdown description for the scenario you want to run in
@@ -146,7 +181,7 @@ Most tests follow the same pattern: start the passive side first, for example
 another terminal, for example `uv run python tests/performance/FT20/ws_client.py`.
 
 Some scenarios also require extra setup such as generated TLS certificates in `testing/certs/` or a local Keycloak
-instance started with `docker compose -f scripts/keycloak/docker-compose.yaml up`; those prerequisites are documented in
+instance started with `docker compose -f scripts/keycloak/docker-compose.yml up`; those prerequisites are documented in
 the corresponding test markdown files.
 
 ---
@@ -156,6 +191,18 @@ the corresponding test markdown files.
 Example clients, servers, and interactive demos live under the `examples/` directory in this repository. It also
 describes how to run them in the [README](examples/README.md).
 
+## Where next
+
+| You want to...                                | Read                                                                                                                                                                                                                                                    |
+|-----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| install and verify the project                | [docs/getting-started.md](docs/getting-started.md)                                                                                                                                                                                                      |
+| understand or change the library              | [docs/architecture/](docs/architecture/README.md)                                                                                                                                                                                                       |
+| run the examples or the RTI demo              | [examples/README.md](examples/README.md), [examples/rti-demo/README.md](examples/rti-demo/README.md)                                                                                                                                                    |
+| understand how the RTI demo is built, and why | [docs/rti-demo/README.md](docs/rti-demo/README.md) (system overview, diagrams, design), [docs/rti-demo/decisions/](docs/rti-demo/decisions/README.md) (decision records), [docs/rti-demo/specs/](docs/rti-demo/specs/README.md) (changes not built yet) |
+| write a plugin for the FSP and SO             | [examples/rti-demo/modules/plugins/GETTING_STARTED.md](examples/rti-demo/modules/plugins/GETTING_STARTED.md), [examples/rti-plugins/README.md](examples/rti-plugins/README.md)                                                                          |
+| read the protocol                             | [docs/protocol_specification/](docs/protocol_specification/RTI_2.0_Protocol_Specification.md)                                                                                                                                                           |
+| contribute a change                           | [CONTRIBUTING.md](CONTRIBUTING.md)                                                                                                                                                                                                                      |
+
 ## Contributing
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull
@@ -163,10 +210,17 @@ requests to us.
 
 ## License
 
-This project is licensed under the Apache License, version 2.0 – see LICENSE for details
+This project is licensed under the Apache License, version 2.0 - see [LICENSE](LICENSE). Every file states its
+copyright and license with an SPDX header (or an entry in [REUSE.toml](REUSE.toml)), following the
+[REUSE](https://reuse.software/) specification, and [LICENSES](LICENSES) holds the texts of the licenses those
+declare: Apache-2.0, and CC-BY-4.0 for the [Code of Conduct](CODE_OF_CONDUCT.md), which is adapted from the
+Contributor Covenant.
 
 ## Licenses third-party code
 
-This project includes third-party code, which is licensed under their own respective Open-Source licenses.
-SPDX-License-Identifier headers are used to show which license is applicable. The concerning license files can be found
-in the LICENSES directory in the root of the documentation. 
+The third-party packages the project depends on keep their own open-source licenses. Which package uses which license
+is listed in [docs/THIRD_PARTY_LICENSES.txt](docs/THIRD_PARTY_LICENSES.txt); the full license texts are in
+[docs/LICENSES](docs/LICENSES/README.md). The library, the RTI demo's services and the HMI's bundle depend only on
+permissive licenses (MIT, BSD, Apache-2.0, PSF-2.0) and MPL-2.0 (certifi); the one copyleft dependency is gpiod
+(LGPL-2.1-or-later), in the dr_panel plugin only. The HMI loads Font Awesome Free (CC-BY-4.0, OFL-1.1 and MIT) from a
+CDN.

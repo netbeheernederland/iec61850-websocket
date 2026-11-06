@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+# SPDX-License-Identifier: Apache-2.0
+
+name: Images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Turn the diff into a JSON list of images to build. On a tag or a manual
+  # dispatch the list is forced to all six.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dorny/paths-filter@v4
+        id: f
+        with:
+          filters: |
+            lib: &lib
+              - 'src/ws61850/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/images.yml'
+            rti: &rti
+              - *lib
+              # bff/fsp/so are now workspace members - the shared root
+              # pyproject.toml/uv.lock is what actually pins their deps
+              # (examples/rti-demo no longer has its own).
+            so:          [ *rti, 'examples/rti-demo/modules/so/**',  'examples/rti-demo/modules/so/pyproject.toml', 'examples/rti-demo/modules/plugins/**', 'examples/rti-demo/modules/common/**' ]
+            fsp:         [ *rti, 'examples/rti-demo/modules/fsp/**', 'examples/rti-demo/modules/fsp/pyproject.toml', 'examples/rti-demo/modules/plugins/**', 'examples/rti-demo/modules/common/**' ]
+            bff:         [ 'examples/rti-demo/modules/bff/**', 'examples/rti-demo/modules/common/**', 'pyproject.toml', 'uv.lock' ]
+            io:          [ 'examples/rti-plugins/dr_panel/**' ]
+            leds:        [ 'examples/rti-plugins/dr_leds/**' ]
+            hmi:         [ 'examples/rti-demo/modules/hmi/**' ]
+
+      - id: set
+        env:
+          FIRED: ${{ toJSON(steps.f.outputs) }}
+        run: |
+          force=${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
+          out='[]'
+          for k in so fsp bff io leds hmi; do
+            hit=$(jq -r --arg k "$k" '.[$k] // "false"' <<<"$FIRED")
+            if [ "$force" = true ] || [ "$hit" = true ]; then
+              out=$(jq -c --arg k "$k" '. + [$k]' <<<"$out")
+            fi
+          done
+          echo "matrix={\"image\":$out}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.matrix != '{"image":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: img
+        run: |
+          case "${{ matrix.image }}" in
+            so)          c=. ; f=examples/rti-demo/modules/so/docker/Dockerfile  ; n=iec61850-websocket/rti-so ; p=linux/amd64,linux/arm64 ; d="RTI demo SO: ACSI client, WebSocket passive side (IEC 61850 over WebSocket)" ;;
+            fsp)         c=. ; f=examples/rti-demo/modules/fsp/docker/Dockerfile ; n=iec61850-websocket/rti-fsp ; p=linux/amd64,linux/arm64 ; d="RTI demo FSP: ACSI server, WebSocket active side (IEC 61850 over WebSocket)" ;;
+            bff)         c=. ; f=examples/rti-demo/modules/bff/docker/Dockerfile ; n=iec61850-websocket/rti-bff ; d="RTI demo BFF: the backend for the HMI" ;;
+            io)          c=examples/rti-plugins/dr_panel ; f=examples/rti-plugins/dr_panel/docker/Dockerfile ; n=iec61850-websocket/dr-panel ; p=linux/amd64,linux/arm64 ; d="RTI demo plugin dr_panel: GPIO and I2C control of the demonstrator panel on a Raspberry Pi" ;;
+            leds)        c=examples/rti-plugins/dr_leds ; f=examples/rti-plugins/dr_leds/docker/Dockerfile ; n=iec61850-websocket/dr-leds ; p=linux/amd64,linux/arm64 ; d="Sample RTI demo plugin dr_leds: two simulated LEDs that show what the FSP or SO does" ;;
+            hmi)         c=examples/rti-demo/modules/hmi ; f=examples/rti-demo/modules/hmi/docker/Dockerfile ; n=iec61850-websocket/rti-hmi ; d="RTI demo HMI: the web interface, served by nginx" ;;
+          esac
+          {
+            echo "ctx=$c"
+            echo "file=$f"
+            echo "name=$n"
+            echo "title=${n##*/}"
+            echo "description=$d"
+            echo "platforms=${p:-linux/amd64}"
+            # Index annotations only with an index: BuildKit refuses them on a
+            # single-platform image ("index annotations not supported for
+            # single platform export"), whose labels ghcr.io reads instead.
+            case "${p:-linux/amd64}" in
+              *,*) echo "annotation_levels=manifest,index" ;;
+              *)   echo "annotation_levels=manifest" ;;
+            esac
+            echo "args<<EOF"
+            [ -n "$a" ] && tr '|' '\n' <<<"$a"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - if: contains(steps.img.outputs.platforms, 'arm64')
+        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # title and description per image, the same as the LABEL in its
+      # Dockerfile (decision 0041); metadata-action's defaults, the
+      # repository's, would override those. Annotations go on each platform's
+      # manifest and, for a multi-platform image, on the index, where ghcr.io
+      # reads its description and license.
+      - id: meta
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: ${{ steps.img.outputs.annotation_levels }}
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ steps.img.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=${{ steps.img.outputs.title }}
+            org.opencontainers.image.description=${{ steps.img.outputs.description }}
+            org.opencontainers.image.vendor=Netbeheer Nederland
+          annotations: |
+            org.opencontainers.image.title=${{ steps.img.outputs.title }}
+            org.opencontainers.image.description=${{ steps.img.outputs.description }}
+            org.opencontainers.image.vendor=Netbeheer Nederland
+
+      # Builds every image for its platforms, but doesn't publish yet: set
+      # push to ${{ github.event_name != 'pull_request' }} to push to ghcr.io.
+      # `file` is relative to the repository root, not to `context`.
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.img.outputs.ctx }}
+          file: ${{ steps.img.outputs.file }}
+          build-args: ${{ steps.img.outputs.args }}
+          platforms: ${{ steps.img.outputs.platforms }}
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: false

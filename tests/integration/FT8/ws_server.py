@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,13 +15,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
+import sys
 
-from ws61850.endpoint.endpoint import WebSocketEndpoint
+from ws61850.endpoint.passive_endpoint import PassiveEndpoint
 from ws61850.iec61850.client.iec61850_client import IEC61850Client, get_now_time
 
-maxMessageSize_server = 65000
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 
-optFlds = {
+opt_flds = {
     "seqNum": False,
     "timeStamp": True,
     "dataSet": True,
@@ -32,16 +39,15 @@ optFlds = {
     "reasonCode": False,
 }
 
-trgOp = {"dchg": False, "qchg": False, "dupd": False, "integrity": True, "gi": False}
+trg_op = {"dchg": False, "qchg": False, "dupd": False, "integrity": True, "gi": False}
 
 brcb = IEC61850Client.ClientReportControlBlock("LD0/LLN0.rcbMinMaxAvg", True)
-
 brcb.rptEna = True
 brcb.confRev = 5
-brcb.optFlds = optFlds
+brcb.optFlds = opt_flds
 brcb.bufTm = 1000
 brcb.sqNum = 42
-brcb.trgOps = trgOp
+brcb.trgOps = trg_op
 brcb.intgPd = 2
 brcb.gi = True
 brcb.purgeBuf = False
@@ -50,23 +56,17 @@ brcb.timeOfEntry = get_now_time()
 brcb.resvTms = 5
 
 urcb = IEC61850Client.ClientReportControlBlock("LD0/LLN0.rcbSetpoints", False)
-
 urcb.rptEna = True
 urcb.confRev = 5
-urcb.optFlds = optFlds
+urcb.optFlds = opt_flds
 urcb.bufTm = 1000
 urcb.sqNum = 88
-urcb.trgOps = trgOp
+urcb.trgOps = trg_op
 urcb.intgPd = 5
 urcb.gi = True
 urcb.entryId = b"\x01\x02\x03\x04\x05\x06\x07\x08"
 urcb.timeOfEntry = get_now_time()
 urcb.resv = True
-
-
-def callback_called(result, param):
-    print("callback called: ", result)
-
 
 data_attribute_value = {
     "name": "Oper",
@@ -106,8 +106,6 @@ data_attribute_value = {
     ),
 }
 
-# data_WMaxSetPct = [{"name": "setMag", "data": ("structure", {"name": "f", "data": [("float32", 19.666)]})}]
-
 oper_val = {
     "ref": "LD0/DWMX1.WMaxSpt",
     "ctlVal": ("float32", 666.43),
@@ -128,38 +126,55 @@ oper_val = {
 }
 
 
+def callback_called(result, param):
+    logger.info("Callback: %s", result)
+
+
+# set_data_values calls its callback with what was written, not (result, param).
+def write_callback_called(obj_ref, value, fc, data_type, result):
+    logger.info(
+        "write callback called: %s [%s] = %r (%s): %s",
+        obj_ref,
+        fc,
+        value,
+        data_type,
+        result,
+    )
+
+
 async def main():
-    ep_ws_server = WebSocketEndpoint()
+    endpoint = PassiveEndpoint()
 
-    iec61850_client = IEC61850Client("cp1")
-    ep_ws_server.add_iec61850_client(iec61850_client)
+    client = IEC61850Client("cp1")
+    endpoint.add_iec61850_client(client)
 
-    asyncio.create_task(ep_ws_server.start("passive", "localhost", 8765))
+    asyncio.create_task(endpoint.start("localhost", 8765))
+    logger.info("Waiting for client connections on localhost:8765")
 
     while True:
-        await ep_ws_server.client_list[0].ready_event.wait()
-        websocket_info = ep_ws_server.get_websocket_info(ep_ws_server.client_list[0])
+        await client.ready_event.wait()
+        websocket_info = endpoint.get_websocket_info(client)
         if websocket_info is not None:
             try:
-                urcb_list = await ep_ws_server.client_list[0].get_logical_node_directory(
+                urcb_list = await client.get_logical_node_directory(
                     "LD0", "LLN0", "urcb", websocket_info, callback_called, None
                 )
-                brcb_list = await ep_ws_server.client_list[0].get_logical_node_directory(
+                brcb_list = await client.get_logical_node_directory(
                     "LD0", "LLN0", "brcb", websocket_info, callback_called, None
                 )
-                server_list = await ep_ws_server.client_list[0].get_server_directory(
+                server_list = await client.get_server_directory(
                     websocket_info, callback_called, None
                 )
-                ld_directory = await ep_ws_server.client_list[0].get_logical_device_directory(
+                ld_directory = await client.get_logical_device_directory(
                     "LD0", websocket_info, callback_called, None
                 )
-                ln_directory_ds = await ep_ws_server.client_list[0].get_logical_node_directory(
+                ln_directory_ds = await client.get_logical_node_directory(
                     "LD0", "LLN0", "dataset", websocket_info, callback_called, None
                 )
-                ln_directory_do = await ep_ws_server.client_list[0].get_logical_node_directory(
+                ln_directory_do = await client.get_logical_node_directory(
                     "LD0", "LLN0", "dataObject", websocket_info, callback_called, None
                 )
-                ds_directory = await ep_ws_server.client_list[0].get_dataset_directory(
+                ds_directory = await client.get_dataset_directory(
                     "LD0",
                     "LLN0",
                     "DataSetMinMaxAvg",
@@ -167,19 +182,19 @@ async def main():
                     callback_called,
                     None,
                 )
-                da_def = await ep_ws_server.client_list[0].get_data_definition(
+                da_def = await client.get_data_definition(
                     "LD0/DWMX1.WMaxSptPct", websocket_info, callback_called, None
                 )
 
-                set_da_res = await ep_ws_server.client_list[0].set_data_values(
+                set_da_res = await client.set_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper",
                     "co",
                     [data_attribute_value],
                     websocket_info,
-                    callback_called,
+                    write_callback_called,
                     None,
                 )
-                da_val = await ep_ws_server.client_list[0].get_data_values(
+                da_val = await client.get_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper",
                     "co",
                     True,
@@ -188,21 +203,19 @@ async def main():
                     None,
                 )
 
-                ####Select######
-                await ep_ws_server.client_list[0].select("LD0/DWMX1.WMaxSpt", websocket_info, callback_called, None)
-                # await ep_wsServer.client_list[0].select("LD0/DWMX1.WMaxSpt", websocket_info, callback_called, None)
-
-                ####Operate#####
-                await ep_ws_server.client_list[0].set_data_values(
+                await client.select(
+                    "LD0/DWMX1.WMaxSpt", websocket_info, callback_called, None
+                )
+                await client.set_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper",
                     "co",
                     [data_attribute_value],
                     websocket_info,
-                    callback_called,
+                    write_callback_called,
                     None,
                 )
-                await ep_ws_server.client_list[0].operate(oper_val, websocket_info, callback_called, None)
-                await ep_ws_server.client_list[0].get_data_values(
+                await client.operate(oper_val, websocket_info, callback_called, None)
+                await client.get_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper",
                     "co",
                     True,
@@ -211,22 +224,22 @@ async def main():
                     None,
                 )
 
-                print("printing the list or returned items from client 1")
-                print("urcb_list:", urcb_list)
-                print("brcb_list:", brcb_list)
-                print("server_list:", server_list)
-                print("ld_directory:", ld_directory)
-                print("ln_directory_ds:", ln_directory_ds)
-                print("ln_directory_do:", ln_directory_do)
-                print("ds_directory:", ds_directory)
-                print("da_def:", da_def)
-                print("da_val:", da_val)
-                print("set_da_res:", set_da_res)
+                logger.info("urcb_list: %s", urcb_list)
+                logger.info("brcb_list: %s", brcb_list)
+                logger.info("server_list: %s", server_list)
+                logger.info("ld_directory: %s", ld_directory)
+                logger.info("ln_directory_ds: %s", ln_directory_ds)
+                logger.info("ln_directory_do: %s", ln_directory_do)
+                logger.info("ds_directory: %s", ds_directory)
+                logger.info("da_def: %s", da_def)
+                logger.info("da_val: %s", da_val)
+                logger.info("set_da_res: %s", set_da_res)
 
             except Exception as e:
-                print("handler not called:", e)
+                logger.exception("Service call failed: %s", e)
                 continue
-        while ep_ws_server.client_list[0].is_connected:
+
+        while client.is_connected:
             await asyncio.sleep(0.1)
 
 

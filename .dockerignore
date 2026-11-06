@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Build context for the repo-root Docker builds (examples/rti-demo/modules/
+# {so,fsp,bff}/docker/Dockerfile). These COPY only:
+#   pyproject.toml, uv.lock (the shared uv workspace lock)
+#   src/ws61850
+#   examples/rti-demo/modules/{so,fsp,bff,plugins}/
+# Everything else is noise in the context. The plugins and the HMI build
+# with their own narrower context (examples/rti-plugins/<plugin>,
+# examples/rti-demo/modules/hmi) instead.
+
+# VCS, IDE, tooling
+.git
+.github
+.claude
+.idea
+.ruff_cache
+.pytest_cache
+
+# Virtualenvs and Python caches
+.venv
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/*$py.class
+
+# Node
+**/node_modules
+**/dist
+
+# Not consumed by any image
+docs
+tests
+testing
+scripts
+keycloak
+examples/ws61850_interactive
+examples/ws61850_mode
+examples/rti-demo/modules/hmi
+examples/rti-plugins
+examples/rti-demo/config/models
+
+# Generated / local state
+**/*.log
+**/*.pid
+launch_config.json
+*.local.json
+stats.json
+
+# Not excluding examples/rti-demo/modules/bff/src/bff/connections.json: it's
+# a seed/default file bff_server.py falls back to reading on first run when
+# BFF_CONNECTIONS_FILE isn't set (or the target volume is empty) - deliberately
+# shipped in the image, not generated state.

@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2025-2026 Netbeheer Nederland
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -18,13 +35,26 @@ SERVER_HOSTNAMES="${SERVER_HOSTNAMES:-localhost,127.0.0.1}"
 echo "🔐 Generating CA..."
 cfssl gencert -initca ca-csr.json | cfssljson -bare ca
 
-echo "🔐 Generating server certificate..."
+echo "🔐 Generating keycloak certificate..."
+HOSTNAME='keycloak'
 cfssl gencert \
   -ca=ca.pem \
   -ca-key=ca-key.pem \
   -config=ca-config.json \
   -profile=server \
-  -hostname="${SERVER_HOSTNAMES}" \
+  -cn="${HOSTNAME}" \
+  -hostname="${HOSTNAME},${SERVER_HOSTNAMES}" \
+  server-csr.json | cfssljson -bare keycloak
+
+echo "🔐 Generating server certificate..."
+HOSTNAME='rti-so'
+cfssl gencert \
+  -ca=ca.pem \
+  -ca-key=ca-key.pem \
+  -config=ca-config.json \
+  -profile=server \
+  -cn="${HOSTNAME}" \
+  -hostname="${HOSTNAME},${SERVER_HOSTNAMES}" \
   server-csr.json | cfssljson -bare server
 
 echo "🔐 Generating client certificate..."
@@ -36,9 +66,9 @@ cfssl gencert \
   -hostname="${SERVER_HOSTNAMES}" \
   client-csr.json | cfssljson -bare client
 
-chmod 600 *-key.pem
-chmod 611 server.pem
-chmod 611 server-key.pem
+chmod 644 *-key.pem
+chmod 644 server.pem
+chmod 644 server-key.pem
 
 echo
 echo "✅ Certificates generated:"

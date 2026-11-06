@@ -1,5 +1,5 @@
 {
-  "CN": "IEC61850-test-server",
+  "CN": "server",
   "hosts": [
     "localhost",
     "127.0.0.1"

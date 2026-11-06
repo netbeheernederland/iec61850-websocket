@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Netbeheer Nederland
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright 2025 Netbeheer Nederland
+# Copyright 2025-2026 Netbeheer Nederland
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,21 +17,18 @@
 import asyncio
 import logging
 import sys
-import traceback
 
-from ws61850.endpoint.endpoint import WebSocketEndpoint
+from ws61850.endpoint.passive_endpoint import PassiveEndpoint
 from ws61850.iec61850.client.iec61850_client import IEC61850Client
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     stream=sys.stdout,
 )
 
-max_message_size_server = 65000
-
-trgOp_urcb = {
+trg_op_urcb = {
     "dchg": False,
     "qchg": False,
     "dupd": False,
@@ -41,12 +38,12 @@ trgOp_urcb = {
 
 urcb = IEC61850Client.ClientReportControlBlock("LD0/LLN0.rcbSetpoints", False)
 urcb.rptEna = True
-urcb.trgOps = trgOp_urcb
+urcb.trgOps = trg_op_urcb
 urcb.intgPd = 1000
 
 
 def callback_called(result, param):
-    print("callback called: ", result)
+    logger.info("callback called: %s", result)
 
 
 data_attribute_value = {
@@ -87,7 +84,7 @@ data_attribute_value = {
     ),
 }
 
-data_WMaxSetPct = [
+data_w_max_set_pct = [
     {
         "name": "setMag",
         "data": ("structure", {"name": "f", "data": [("float32", 19.666)]}),
@@ -115,34 +112,33 @@ oper_val = {
 
 
 async def main():
-    ep_wsServer = WebSocketEndpoint()
+    endpoint = PassiveEndpoint()
 
-    iec61850_client = IEC61850Client("cp1")
-    ep_wsServer.add_iec61850_client(iec61850_client)
+    client1 = IEC61850Client("cp1")
+    endpoint.add_iec61850_client(client1)
 
-    iec61850_client = IEC61850Client("cp2")
-    ep_wsServer.add_iec61850_client(iec61850_client)
+    client2 = IEC61850Client("cp2")
+    endpoint.add_iec61850_client(client2)
 
     server_task = asyncio.create_task(
-        ep_wsServer.start("passive", "localhost", 8765, protocol=["iec61850-tpaa-ber-v1"])
+        endpoint.start("localhost", 8765, protocol=["iec61850-tpaa-ber-v1"])
     )
 
-    await ep_wsServer.client_list[0].ready_event.wait()
-    if ep_wsServer.client_list[0].is_connected is True:
-        websocket_info = ep_wsServer.get_websocket_info(ep_wsServer.client_list[0])
+    await client1.ready_event.wait()
+    if client1.is_connected is True:
+        websocket_info = endpoint.get_websocket_info(client1)
         if websocket_info is not None:
             try:
-                server_list = await ep_wsServer.client_list[0].get_server_directory(
+                await client1.get_server_directory(
                     websocket_info, callback_called, None
                 )
-                ld_directory = await ep_wsServer.client_list[0].get_logical_device_directory(
+                await client1.get_logical_device_directory(
                     "LD0", websocket_info, callback_called, None
                 )
-
-                ln_directory_do = await ep_wsServer.client_list[0].get_logical_node_directory(
+                await client1.get_logical_node_directory(
                     "LD0", "LLN0", "dataObject", websocket_info, callback_called, None
                 )
-                ds_directory = await ep_wsServer.client_list[0].get_dataset_directory(
+                await client1.get_dataset_directory(
                     "LD0",
                     "LLN0",
                     "DataSetMinMaxAvg",
@@ -150,13 +146,13 @@ async def main():
                     callback_called,
                     None,
                 )
-                da_def = await ep_wsServer.client_list[0].get_data_definition(
+                await client1.get_data_definition(
                     "LD0/DWMX1.WMaxSptPct", websocket_info, callback_called, None
                 )
-                da_dir = await ep_wsServer.client_list[0].get_data_directory(
+                await client1.get_data_directory(
                     "LD0/MMXU1.A", websocket_info, callback_called, None
                 )
-                set_da_res = await ep_wsServer.client_list[0].set_data_values(
+                await client1.set_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper",
                     "co",
                     [data_attribute_value],
@@ -164,12 +160,11 @@ async def main():
                     callback_called,
                     None,
                 )
-                ####Select######
-                await ep_wsServer.client_list[0].select("LD0/DWMX1.WMaxSpt", websocket_info, callback_called, None)
-
-                ####Operate#####
-                await ep_wsServer.client_list[0].operate(oper_val, websocket_info, callback_called, None)
-                await ep_wsServer.client_list[0].get_data_values(
+                await client1.select(
+                    "LD0/DWMX1.WMaxSpt", websocket_info, callback_called, None
+                )
+                await client1.operate(oper_val, websocket_info, callback_called, None)
+                await client1.get_data_values(
                     "LD0/DWMX1.WMaxSpt.Oper",
                     "co",
                     True,
@@ -177,17 +172,14 @@ async def main():
                     callback_called,
                     None,
                 )
-
-                set_urcb_res = await ep_wsServer.client_list[0].set_URCB_values(
+                await client1.set_URCB_values(
                     urcb, websocket_info, callback_called, None
                 )
 
             except Exception as e:
-                print("handler not called:", e)
-                traceback.print_exc()
-
+                logger.exception("Service call failed: %s", e)
     else:
-        print("did not enter first if ")
+        logger.warning("Client did not connect")
 
     await server_task
 

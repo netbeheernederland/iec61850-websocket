@@ -1,10 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Netbeheer Nederland
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [project]
 name = "iec61850-websocket"
 version = "1.0.0"
 description = "This project is a proof-of-concept (PoC) that exposes IEC 61850 information and events to modern applications using WebSockets."
 
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 
 license = "Apache-2.0"
 license-files = [
@@ -15,26 +19,24 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
-    "asn1tools ==0.167.0",
-    "websockets == 16.0",
+    "asn1tools ==0.169.0",
+    "websockets == 16.1",
     "bitstruct == 8.21.0",
     "certifi== 2026.1.4",
     "cffi == 2.0.0",
     "charset-normalizer == 3.4.4",
     "cryptography == 46.0.5",
-    "idna == 3.11",
+    "idna == 3.18",
     "pycparser == 2.23",
     "pyjwt == 2.10.1",
     "pyparsing == 3.2.5",
     "requests == 2.32.5",
     "urllib3 == 2.6.3",
-    "aiohttp == 3.13.3",
+    "aiohttp == 3.14.1",
     "flask >= 3.1.3"
 ]
 
@@ -42,7 +44,8 @@ dependencies = [
 dev = [
     "pytest >= 9.0.0",
     "pytest-asyncio >= 1.3.0",
-    "black >= 26.3.0",
+    # tests/unit reads the rti-demo's compose files
+    "pyyaml >= 6.0",
     "ruff >= 0.15.5"
 ]
 
@@ -68,16 +71,38 @@ markers = [
 ]
 
 [tool.ruff]
-line-length = 88
-target-version = "py310"
+# line-length: ruff's default (88)
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 ignore = ["E501"]
 
-[tool.black]
-line-length = 120
-target-version = ["py310", "py311", "py312"]
+[tool.ruff.lint.per-file-ignores]
+# These modules' class-scope "variables" are Enum members / dataclass fields
+# whose exact spelling IS the IEC 61850 wire format: they match literal
+# ASN.1 grammar terms in src/ws61850/asn1/schema/*.asn, and several are
+# serialized directly via dataclasses.asdict()/to_wire() or read back via
+# Enum.name when building/parsing protocol messages. Renaming them would
+# change wire behavior, not just style, so N815 is not applicable here.
+"src/ws61850/iec61850/server/service_error.py" = ["N815"]
+"src/ws61850/iec61850/server/control_handling.py" = ["N815"]
+"src/ws61850/iec61850/server/server_report_control.py" = ["N815"]
+"src/ws61850/protocol/types.py" = ["N815"]
 
 [tool.uv]
 package = true
+
+[tool.uv.workspace]
+# The plugins in examples/rti-plugins are deliberately not members: each is
+# its own uv project with its own lock and image (decisions 0029, 0030). The
+# IO plugin also needs Raspberry Pi hardware packages (gpiozero, gpiod,
+# Adafruit-ADS1x15, smbus2) that won't resolve/install on a non-Pi dev
+# machine. The FSP and SO reach plugins over HTTP, so none is a member.
+members = [
+    "examples/rti-demo/modules/so",
+    "examples/rti-demo/modules/fsp",
+    "examples/rti-demo/modules/bff",
+    "examples/rti-demo/modules/plugins",
+    "examples/rti-demo/modules/common",
+]

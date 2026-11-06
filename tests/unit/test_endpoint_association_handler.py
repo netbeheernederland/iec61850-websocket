@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: 2025-2026 Netbeheer Nederland
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2025-2026 Netbeheer Nederland
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for AssociationHandler."""
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from ws61850.endpoint.association_handler import (
+    ACTION_ABORT,
+    ACTION_CONTINUE,
+    ACTION_RELEASE,
+    AssociationHandler,
+)
+from ws61850.endpoint.base import WebSocketInfo
+
+
+@pytest.fixture
+def websocket_info():
+    ws = MagicMock()
+    info = WebSocketInfo(ws, associate_id="assoc-1")
+    info.invoke_id = 0
+    info.is_ber_protocol = False
+    return info
+
+
+@pytest.fixture
+def mock_websocket():
+    ws = MagicMock()
+    ws.send = AsyncMock()
+    ws.close = AsyncMock()
+    transport_mock = MagicMock()
+    ws.transport = transport_mock
+    return ws
+
+
+class TestAssociationHandlerAbort:
+    def test_abort_returns_abort_sentinel(self, mock_websocket, websocket_info):
+        handler = AssociationHandler()
+
+        async def _run():
+            with patch(
+                "ws61850.endpoint.association_handler.encode_tpaa_message",
+                return_value=b"abort-frame",
+            ):
+                with patch(
+                    "ws61850.endpoint.association_handler.create_tpaa_abort_response",
+                    return_value=object(),
+                ):
+                    return await handler.handle(
+                        "abortRequest", None, mock_websocket, websocket_info
+                    )
+
+        result = asyncio.run(_run())
+        assert result == ACTION_ABORT
+
+    def test_abort_sends_response_and_aborts_transport(
+        self, mock_websocket, websocket_info
+    ):
+        handler = AssociationHandler()
+
+        async def _run():
+            with patch(
+                "ws61850.endpoint.association_handler.encode_tpaa_message",
+                return_value=b"abort-frame",
+            ):
+                with patch(
+                    "ws61850.endpoint.association_handler.create_tpaa_abort_response",
+                    return_value=object(),
+                ):
+                    await handler.handle(
+                        "abortRequest", None, mock_websocket, websocket_info
+                    )
+
+        asyncio.run(_run())
+        mock_websocket.send.assert_awaited_once()
+        mock_websocket.transport.abort.assert_called_once()
+
+
+class TestAssociationHandlerRelease:
+    def test_release_returns_release_sentinel(self, mock_websocket, websocket_info):
+        handler = AssociationHandler()
+
+        async def _run():
+            with patch(
+                "ws61850.endpoint.association_handler.encode_tpaa_message",
+                return_value=b"release-frame",
+            ):
+                with patch(
+                    "ws61850.endpoint.association_handler.create_tpaa_release_response",
+                    return_value=object(),
+                ):
+                    return await handler.handle(
+                        "releaseRequest", None, mock_websocket, websocket_info
+                    )
+
+        result = asyncio.run(_run())
+        assert result == ACTION_RELEASE
+
+    def test_release_sends_response_and_closes(self, mock_websocket, websocket_info):
+        handler = AssociationHandler()
+
+        async def _run():
+            with patch(
+                "ws61850.endpoint.association_handler.encode_tpaa_message",
+                return_value=b"release-frame",
+            ):
+                with patch(
+                    "ws61850.endpoint.association_handler.create_tpaa_release_response",
+                    return_value=object(),
+                ):
+                    await handler.handle(
+                        "releaseRequest", None, mock_websocket, websocket_info
+                    )
+
+        asyncio.run(_run())
+        mock_websocket.send.assert_awaited_once()
+        mock_websocket.close.assert_awaited_once()
+
+
+class TestAssociationHandlerUnknown:
+    def test_unknown_type_returns_continue(self, mock_websocket, websocket_info):
+        handler = AssociationHandler()
+
+        async def _run():
+            return await handler.handle(
+                "associateResponse", MagicMock(), mock_websocket, websocket_info
+            )
+
+        result = asyncio.run(_run())
+        assert result == ACTION_CONTINUE
+
+    def test_unknown_type_sends_nothing(self, mock_websocket, websocket_info):
+        handler = AssociationHandler()
+
+        async def _run():
+            await handler.handle(
+                "associateResponse", MagicMock(), mock_websocket, websocket_info
+            )
+
+        asyncio.run(_run())
+        mock_websocket.send.assert_not_awaited()
